@@ -36,7 +36,7 @@ logging.basicConfig(level=LOG_LEVEL)
 
 def multiprocessify(func):
     @functools.wraps(func)
-    def outer_wrapper(*pargs, **kwargs):
+    def wrapper(*pargs, **kwargs):
         proc = multiprocessing.Process(target=func, args=pargs, kwargs=kwargs)
         proc.start()
         return proc
