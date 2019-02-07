@@ -8,6 +8,7 @@ import threading
 import functools
 import os
 import os.path
+import signal
 import tempfile
 import time
 from enum import (
@@ -32,6 +33,7 @@ import irc.client
 APP_NAME = 'doty'
 LOG_LEVEL = logging.INFO
 
+signal.signal(signal.SIGINT, signal.SIG_IGN)
 logging.basicConfig(level=LOG_LEVEL)
 
 def multiprocessify(func):
@@ -277,7 +279,13 @@ def proc_worker(worker_config, mmbl_conn, irc_conn, master_conn):
     log.debug('Worker process exiting')
 
 def main(args):
-    keep_running = True
+    stop_running = threading.Event()
+
+    def handle_sigint(*args):
+        log.debug('Caught ^C, shutting down')
+        stop_running.set()
+    signal.signal(signal.SIGINT, handle_sigint)
+
     with open(args.config) as config_handle:
         config = yaml.safe_load(config_handle)
 
@@ -299,11 +307,8 @@ def main(args):
     except AttributeError: pass
 
     log.debug('Entering sleep loop')
-    try:
-        while keep_running:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        log.debug('Caught ^C, shutting down')
+    while not stop_running.is_set():
+        time.sleep(1)
 
     r.send({'cmd': MumbleControlCommand.EXIT})
     d.send({'cmd': IrcControlCommand.EXIT})
