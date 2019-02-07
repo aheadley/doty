@@ -22,33 +22,21 @@ from google.cloud.speech import (
 )
 import pymumble_py3 as pymumble
 import yaml
-
 from pymumble_py3.constants import *
 from pymumble_py3.errors import (
     UnknownChannelError,
 )
+import irc.client
 
 
 APP_NAME = 'doty'
-SOPEL_CONFIG_TEMPLATE = """
-[core]
-nick = {username}
-host = {server}
-use_ssl = {ssl}
-port = {port:d}
-owner = {owner}
-channels = {channel_list}
-enable = admin, reload, APP_NAME
+LOG_LEVEL = logging.INFO
 
-[APP_NAME]
-socket_path = {socket_path}
-""".replace('APP_NAME', APP_NAME)
-
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=LOG_LEVEL)
 
 def multiprocessify(func):
     @functools.wraps(func)
-    def wrapper(*pargs, **kwargs):
+    def outer_wrapper(*pargs, **kwargs):
         proc = multiprocessing.Process(target=func, args=pargs, kwargs=kwargs)
         proc.start()
         return proc
@@ -88,40 +76,47 @@ class MumbleControlCommand(Enum):
     SEND_AUDIO_MSG = auto()
     MOVE_TO_CHANNEL = auto()
 
+class IrcControlCommand(Enum):
+    EXIT = auto()
+    SEND_CHANNEL_TEXT_MSG = auto()
+
 @multiprocessify
-def proc_sopel(socket_path, sopel_config):
-    log = getWorkerLogger('sopel')
+def proc_irc(irc_config, worker_conn):
+    log = getWorkerLogger('irc', level=LOG_LEVEL)
     keep_running = True
 
-    log.debug('Starting sopel process')
+    log.debug('Starting irc process')
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with tempfile.NamedTemporaryFile(suffix='.cfg', dir=tmpdir.name) as tmp_sopel_cfg:
-            cfg = SOPEL_CONFIG_TEMPLATE.format(
-                channel_list=', '.join(sopel_config['channels']),
-                socket_path=socket_path,
-                **sopel_config,
-            )
-            log.debug('Generated sopel config: \n%s', cfg)
-            tmp_sopel_cfg.write(cfg)
-            tmp_sopel_cfg.flush()
+    client = irc.client.Reactor()
+    server = client.server()
 
-            proc = subprocess.Popen(['sopel', '-c', tmp_sopel_cfg.name],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                cwd=tmpdir.name,
-            )
+    def handle_irc_message(conn, event):
+        log.debug('Handling event: %s', event)
 
-        while keep_running:
-            try:
-                proc.wait(1)
-            except subprocess.TimeoutExpired: pass
-        proc.terminate()
+    client.add_global_handler('pubmsg', handle_irc_message)
+    client.add_global_handler('privmsg', handle_irc_message)
+
+    log.info('IRC client running')
+    while keep_running:
+        if not server.connected:
+            server.connect(irc_config['server'], irc_config['port'], irc_config['username'])
+            server.join(irc_config['channel'])
+
+        client.process_once(0.5)
+
+        if worker_conn.poll(0.5):
+            cmd_data = worker_conn.recv()
+            log.debug('Recieved control command: %r', cmd_data)
+            if cmd_data['cmd'] == IrcControlCommand.EXIT:
+                server.disconnect()
+                keep_running = False
+            elif cmd_data['cmd'] == IrcControlCommand.SEND_CHANNEL_TEXT_MSG:
+                server.privmsg(irc_config['channel'], cmd_data['msg'])
+    log.debug('IRC process exiting')
 
 @multiprocessify
 def proc_mmbl(mmbl_config, worker_conn):
-    log = getWorkerLogger('mmbl')
+    log = getWorkerLogger('mmbl', level=LOG_LEVEL)
     keep_running = True
 
     log.debug('Starting mumble process')
@@ -145,6 +140,7 @@ def proc_mmbl(mmbl_config, worker_conn):
     log.debug('Starting mumble connection')
     mmbl.start()
     mmbl.is_ready()
+    log.info('Connected to mumble server: %s', mmbl_config['server'])
 
     log.debug('Entering control loop')
     while keep_running:
@@ -171,10 +167,11 @@ def proc_mmbl(mmbl_config, worker_conn):
                     mmbl.channels.new_channel(0, cmd_data['channel_name'])
                 else:
                     mmbl.users.myself.move_in(target_channel['channel_id'])
+    log.debug('Mumble process exiting')
 
 @multiprocessify
-def proc_worker(worker_config, mmbl_conn):
-    log = getWorkerLogger('worker')
+def proc_worker(worker_config, mmbl_conn, irc_conn, master_conn):
+    log = getWorkerLogger('worker', level=LOG_LEVEL)
     keep_running = True
     log.debug('Worker starting up')
 
@@ -202,6 +199,7 @@ def proc_worker(worker_config, mmbl_conn):
                 }
         return None                
 
+    log.info('Worker running')
     while keep_running:
         if mmbl_conn.poll(worker_config['wait_time']):
             (event_type, event_args) = mmbl_conn.recv()
@@ -236,6 +234,10 @@ def proc_worker(worker_config, mmbl_conn):
                 msg_data = event_args[0]
                 sender = MMBL_USERS[msg_data['actor']]
 
+                if msg_data['channel_id']:
+                    irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
+                        'msg': '<{}:text> {}'.format(sender['name'], msg_data['message'])})
+
                 # !moveto command
                 if msg_data['message'].startswith('!moveto'):
                     target_name = msg_data['message'].strip().split(' ', 1)[1]
@@ -255,10 +257,12 @@ def proc_worker(worker_config, mmbl_conn):
                     result = transcribe(audio_buffer)
                     if result:
                         log.info('Transcription result: %s ~%1.3f => %s', user['name'], result['confidence'], result['transcript'])
-                        mmbl_conn.send({'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
-                            'channel_id': user['channel_id'],
-                            'msg': '{} said: {}'.format(user['name'], result['transcript'],
-                        )})
+                        # mmbl_conn.send({'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
+                        #     'channel_id': user['channel_id'],
+                        #     'msg': '{} said: {}'.format(user['name'], result['transcript'],
+                        # )})
+                        irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
+                            'msg': '<{}:audio> {}'.format(user['name'], result['transcript'])})
                     else:
                         log.warning('Failed to transcribe audio from: %s', user['name'])
                 else:
@@ -267,35 +271,69 @@ def proc_worker(worker_config, mmbl_conn):
                 data['buffer'].clear()
                 data['ping'] = None
 
+        if master_conn.poll(0.1):
+            if master_conn.recv():
+                keep_running = False
+    log.debug('Worker process exiting')
+
 def main(args):
     keep_running = True
     with open(args.config) as config_handle:
         config = yaml.safe_load(config_handle)
 
     l, r = multiprocessing.Pipe()
+    u, d = multiprocessing.Pipe()
+    i, o = multiprocessing.Pipe()
 
     try:
         mmbl = proc_mmbl(config['mumble'], l)
         mmbl.run()
     except AttributeError: pass
     try:
-        worker = proc_worker(config['worker'], r)
+        irc = proc_irc(config['irc'], u)
+        irc.run()
+    except AttributeError: pass
+    try:
+        worker = proc_worker(config['worker'], r, d, o)
         worker.run()
     except AttributeError: pass
-    # try:
-    #     sopel = proc_worker(config['main']['irc_socket'], config['irc'])
-    #     sopel.run()
-    # except AttributeError: pass
 
     log.debug('Entering sleep loop')
-    while keep_running:
-        time.sleep(1)
+    try:
+        while keep_running:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        log.debug('Caught ^C, shutting down')
+
+    r.send({'cmd': MumbleControlCommand.EXIT})
+    d.send({'cmd': IrcControlCommand.EXIT})
+    i.send(True)
+
+    mmbl.join()
+    irc.join()
+    worker.join()
+
+    log.info('Shutdown complete')
 
 if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config')
+    parser.add_argument('-v', '--verbose',
+        help='Log more messages',
+        action='count', default=0,
+    )
+    parser.add_argument('-q', '--quiet',
+        help='Log fewer messages',
+        action='count', default=0,
+    )
     args = parser.parse_args()
+
+    LOG_LEVEL = min(logging.CRITICAL, max(logging.DEBUG,
+        logging.INFO + (args.quiet * 10) - (args.verbose * 10)
+    ))
+    log.setLevel(LOG_LEVEL)
+    logging.getLogger().setLevel(LOG_LEVEL)
 
     main(args)
