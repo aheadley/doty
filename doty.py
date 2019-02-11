@@ -294,7 +294,7 @@ def proc_transcriber(transcription_config, router_conn):
                         'txid': cmd_data['txid'],
                     })
                 else:
-                    log.debug('No transcription result for: %d', cmd_data['actor'])
+                    log.debug('No transcription result for: txid=%s, session=%d', cmd_data['txid'], cmd_data['actor'])
             elif cmd_data['cmd'] == TranscriberControlCommand.TRANSCRIBE_COMMAND:
                 pass
             else:
@@ -363,6 +363,8 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
                     mmbl_conn.send({'cmd': MumbleControlCommand.MOVE_TO_CHANNEL, 'channel_name': target_name})
             elif event_type == PYMUMBLE_CLBK_SOUNDRECEIVED:
                 (sender, sound_chunk) = event_args
+                if AUDIO_BUFFERS[sender['session']]['last_sample'] is None:
+                    log.debug('Started recieving audio for: %s', sender['name'])
                 AUDIO_BUFFERS[sender['session']]['buffer'].append(sound_chunk)
                 AUDIO_BUFFERS[sender['session']]['last_sample'] = time.time()
             else:
@@ -371,6 +373,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
         if trans_conn.poll(POLL_TIMEOUT / POLL_COUNT):
             cmd_data = trans_conn.recv()
             if cmd_data['cmd'] == RouterControlCommand.TRANSCRIBE_MESSAGE_RESPONSE:
+                log.debug('Recieved transcription result for: txid=%s', cmd_data['txid'])
                 irc_conn.send({
                     'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
                     'msg': '<{}:audio~{:1.3f}> {}'.format(
