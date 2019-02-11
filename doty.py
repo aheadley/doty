@@ -8,9 +8,12 @@ import threading
 import functools
 import os
 import os.path
+import queue
 import signal
+import ssl
 import tempfile
 import time
+import uuid
 from enum import (
     Enum,
     auto,
@@ -28,10 +31,13 @@ from pymumble_py3.errors import (
     UnknownChannelError,
 )
 import irc.client
+import irc.connection
+from bs4 import BeautifulSoup
 
 
 APP_NAME = 'doty'
 LOG_LEVEL = logging.INFO
+POLL_TIMEOUT = 0.1
 
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 logging.basicConfig(level=LOG_LEVEL)
@@ -71,6 +77,45 @@ def denote_callback(clbk_type):
         return inner_wrapper
     return outer_wrapper
 
+def generate_uuid():
+    return str(uuid.uuid1())
+
+class QueuePipe:
+    def __init__(self):
+        self._in = multiprocessing.Queue()
+        self._out = multiprocessing.Queue()
+
+        self._buffer = []
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        self._swap()
+
+    def send(self, data):
+        return self._out.put(data)
+
+    def recv(self):
+        try:
+            return self._buffer.pop()
+        except IndexError:
+            return self._in.get()
+
+    def poll(self, timeout=None):
+        try:
+            self._buffer.insert(0, self._in.get(timeout=timeout))
+            return True
+        except queue.Empty:
+            return False
+
+    def _swap(self):
+        self._in, self._out = self._out, self._in
+
+    def join(self):
+        try:
+            self._out.close()
+            self._out.join_thread()
+        except Exception: pass
+
 class MumbleControlCommand(Enum):
     EXIT = auto()
     SEND_CHANNEL_TEXT_MSG = auto()
@@ -82,8 +127,19 @@ class IrcControlCommand(Enum):
     EXIT = auto()
     SEND_CHANNEL_TEXT_MSG = auto()
 
+class TranscriberControlCommand(Enum):
+    EXIT = auto()
+    TRANSCRIBE_MESSAGE = auto()
+    TRANSCRIBE_COMMAND = auto()
+
+class RouterControlCommand(Enum):
+    EXIT = auto()
+    TRANSCRIBE_MESSAGE_RESPONSE = auto()
+    TRANSCRIBE_COMMAND_RESPONSE = auto()
+
 @multiprocessify
-def proc_irc(irc_config, worker_conn):
+def proc_irc(irc_config, router_conn):
+    POLL_COUNT = 2
     log = getWorkerLogger('irc', level=LOG_LEVEL)
     keep_running = True
 
@@ -91,9 +147,17 @@ def proc_irc(irc_config, worker_conn):
 
     client = irc.client.Reactor()
     server = client.server()
+    if irc_config['ssl']:
+        ssl_ctx = ssl.create_default_context()
+        if not irc_config['ssl_verify']:
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+        conn_factory = irc.connection.Factory(wrapper=lambda s:
+            ssl_ctx.wrap_socket(s, server_hostname=irc_config['server']))
+    else:
+        conn_factory = irc.connection.Factory()
 
     def handle_irc_message(conn, event):
-        log.debug('Handling event: %s', event)
+        log.debug('Recieved IRC event: %s', event)
 
     client.add_global_handler('pubmsg', handle_irc_message)
     client.add_global_handler('privmsg', handle_irc_message)
@@ -101,39 +165,51 @@ def proc_irc(irc_config, worker_conn):
     log.info('IRC client running')
     while keep_running:
         if not server.connected:
-            server.connect(irc_config['server'], irc_config['port'], irc_config['username'])
+            server.connect(irc_config['server'], irc_config['port'],
+                irc_config['username'], connect_factory=conn_factory)
             server.join(irc_config['channel'])
 
-        client.process_once(0.5)
+        client.process_once(POLL_TIMEOUT / POLL_COUNT)
 
-        if worker_conn.poll(0.5):
-            cmd_data = worker_conn.recv()
+        if router_conn.poll(POLL_TIMEOUT / POLL_COUNT):
+            cmd_data = router_conn.recv()
             log.debug('Recieved control command: %r', cmd_data)
             if cmd_data['cmd'] == IrcControlCommand.EXIT:
+                log.debug('Recieved EXIT command from router')
                 server.disconnect()
                 keep_running = False
             elif cmd_data['cmd'] == IrcControlCommand.SEND_CHANNEL_TEXT_MSG:
                 server.privmsg(irc_config['channel'], cmd_data['msg'])
+            else:
+                log.warning('Unrecognized command: %r', cmd_data)
     log.debug('IRC process exiting')
 
 @multiprocessify
-def proc_mmbl(mmbl_config, worker_conn):
+def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
+    POLL_COUNT = 1
     log = getWorkerLogger('mmbl', level=LOG_LEVEL)
     keep_running = True
 
     log.debug('Starting mumble process')
     mmbl = pymumble.Mumble(mmbl_config['server'],
         mmbl_config['username'], password=mmbl_config['password'],
-        debug=False,
+        port=mmbl_config['port'],
+        debug=pymumble_debug,
+        reconnect=True,
     )
     mmbl.set_receive_sound(True)
 
     log.debug('Setting up callbacks')
     def handle_callback(clbk_type, *args):
         args = normalize_callback_args(clbk_type, args)
-        if clbk_type != PYMUMBLE_CLBK_SOUNDRECEIVED:
+        if clbk_type == PYMUMBLE_CLBK_SOUNDRECEIVED:
+            # avoid memory leak in pymumble
+            try:
+                mmbl.users[args[0]['session']].sound.get_sound()
+            except Exception: pass
+        else:
             log.debug('Callback event: %s => %r', clbk_type, args)
-        worker_conn.send((clbk_type, args))
+        router_conn.send((clbk_type, args))
 
     for callback_type in (v for k, v in globals().items() if k.startswith('PYMUMBLE_CLBK_')):
         clbk = denote_callback(callback_type)(handle_callback)
@@ -146,11 +222,11 @@ def proc_mmbl(mmbl_config, worker_conn):
 
     log.debug('Entering control loop')
     while keep_running:
-        if worker_conn.poll(1):
-            cmd_data = worker_conn.recv()
+        if router_conn.poll(POLL_TIMEOUT):
+            cmd_data = router_conn.recv()
             log.debug('Recieved control command: %r', cmd_data)
             if cmd_data['cmd'] == MumbleControlCommand.EXIT:
-                log.info('Recieved exit command')
+                log.debug('Recieved exit command from router')
                 keep_running = False
             elif cmd_data['cmd'] == MumbleControlCommand.SEND_CHANNEL_TEXT_MSG:
                 log.debug('Sending text message to channel: %s => %s',
@@ -169,28 +245,27 @@ def proc_mmbl(mmbl_config, worker_conn):
                     mmbl.channels.new_channel(0, cmd_data['channel_name'])
                 else:
                     mmbl.users.myself.move_in(target_channel['channel_id'])
+            else:
+                log.warning('Unrecognized command: %r', cmd_data)
     log.debug('Mumble process exiting')
 
 @multiprocessify
-def proc_worker(worker_config, mmbl_conn, irc_conn, master_conn):
-    log = getWorkerLogger('worker', level=LOG_LEVEL)
+def proc_transcriber(transcription_config, router_conn):
+    POLL_COUNT = 1
+    log = getWorkerLogger('transcriber', level=LOG_LEVEL)
     keep_running = True
-    log.debug('Worker starting up')
+    log.debug('Transcribing starting up')
 
-    MMBL_CHANNELS = {}
-    MMBL_USERS = {}
-    AUDIO_BUFFERS = {}
+    speech_client = speech.SpeechClient.from_service_account_json(transcription_config['google_cloud_auth'])
 
-    speech_client = speech.SpeechClient.from_service_account_json(worker_config['google_cloud_auth'])
-
-    def transcribe(buf):
+    def transcribe(buf, phrases=[]):
         speech_content = types.RecognitionAudio(content=buf)
         speech_config = types.RecognitionConfig(
             encoding=enums.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=48000,
-            language_code=worker_config['speech_lang'],
-            speech_contexts=[types.SpeechContext(phrases=[u['name'] for u in MMBL_USERS.values()] \
-                + worker_config['hint_phrases'])],
+            language_code=transcription_config['speech_lang'],
+            speech_contexts=[types.SpeechContext(phrases=phrases \
+                + transcription_config['hint_phrases'])],
         )
         response = speech_client.recognize(speech_config, speech_content)
         for result in response.results:
@@ -201,9 +276,49 @@ def proc_worker(worker_config, mmbl_conn, irc_conn, master_conn):
                 }
         return None                
 
-    log.info('Worker running')
+    log.info('Transcriber running')
     while keep_running:
-        if mmbl_conn.poll(worker_config['wait_time']):
+        if router_conn.poll(POLL_TIMEOUT / POLL_COUNT):
+            cmd_data = router_conn.recv()
+            log.debug('Recieved command: %r', cmd_data['cmd'])
+            if cmd_data['cmd'] == TranscriberControlCommand.EXIT:
+                log.debug('Recieved EXIT command from router')
+                keep_running = False
+            elif cmd_data['cmd'] == TranscriberControlCommand.TRANSCRIBE_MESSAGE:
+                result = transcribe(cmd_data['buffer'], cmd_data['phrases'])
+                if result:
+                    router_conn.send({
+                        'cmd': RouterControlCommand.TRANSCRIBE_MESSAGE_RESPONSE,
+                        'actor': cmd_data['actor'],
+                        'result': result,
+                        'txid': cmd_data['txid'],
+                    })
+                else:
+                    log.debug('No transcription result for: %d', cmd_data['actor'])
+            elif cmd_data['cmd'] == TranscriberControlCommand.TRANSCRIBE_COMMAND:
+                pass
+            else:
+                log.warning('Unrecognized command: %r', cmd_data)
+    log.debug('Transcriber process exiting')
+
+@multiprocessify
+def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
+    POLL_COUNT = 3
+    log = getWorkerLogger('router', level=LOG_LEVEL)
+    keep_running = True
+    log.debug('Router starting up')
+
+    MMBL_CHANNELS = {}
+    MMBL_USERS = {}
+    AUDIO_BUFFERS = {}
+
+    mmbl_conn._swap()
+    irc_conn._swap()
+    trans_conn._swap()
+
+    log.info('Router running')
+    while keep_running:
+        if mmbl_conn.poll(POLL_TIMEOUT / POLL_COUNT):
             (event_type, event_args) = mmbl_conn.recv()
             if event_type != PYMUMBLE_CLBK_SOUNDRECEIVED:
                 # sound events are way too noisy
@@ -213,8 +328,9 @@ def proc_worker(worker_config, mmbl_conn, irc_conn, master_conn):
                 user_data = event_args[0]
                 MMBL_USERS[user_data['session']] = user_data
                 AUDIO_BUFFERS[user_data['session']] = {
-                    'buffer': collections.deque(maxlen=(worker_config['buffer_time'] * 1000) // 20),
-                    'ping': None
+                    # 'buffer': collections.deque(maxlen=(router_config['buffer_time'] * 1000) // 20),
+                    'buffer': collections.deque(),
+                    'last_sample': None
                 }
             elif event_type == PYMUMBLE_CLBK_USERUPDATED:
                 (user_data, changes) = event_args
@@ -231,92 +347,125 @@ def proc_worker(worker_config, mmbl_conn, irc_conn, master_conn):
                 MMBL_CHANNELS[channel_data['channel_id']].update(changes)
             elif event_type == PYMUMBLE_CLBK_CHANNELREMOVED:
                 channel_data = event_args[0]
-                del MMBL_CHANNELS[channel-data['channel_id']]
+                del MMBL_CHANNELS[channel_data['channel_id']]
             elif event_type == PYMUMBLE_CLBK_TEXTMESSAGERECEIVED:
                 msg_data = event_args[0]
                 sender = MMBL_USERS[msg_data['actor']]
+                clean_message = BeautifulSoup(msg_data['message'], 'html.parser').get_text().strip()
 
                 if msg_data['channel_id']:
                     irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
-                        'msg': '<{}:text> {}'.format(sender['name'], msg_data['message'])})
+                        'msg': '<{}:text> {}'.format(sender['name'], clean_message)})
 
                 # !moveto command
-                if msg_data['message'].startswith('!moveto'):
-                    target_name = msg_data['message'].strip().split(' ', 1)[1]
+                if clean_message.startswith('!moveto'):
+                    target_name = clean_message.split(' ', 1)[1]
                     mmbl_conn.send({'cmd': MumbleControlCommand.MOVE_TO_CHANNEL, 'channel_name': target_name})
             elif event_type == PYMUMBLE_CLBK_SOUNDRECEIVED:
                 (sender, sound_chunk) = event_args
                 AUDIO_BUFFERS[sender['session']]['buffer'].append(sound_chunk)
-                AUDIO_BUFFERS[sender['session']]['ping'] = time.time()
+                AUDIO_BUFFERS[sender['session']]['last_sample'] = time.time()
+            else:
+                log.warning('Unrecognized mumble event type: %s => %r', event_type, event_args)
+
+        if trans_conn.poll(POLL_TIMEOUT / POLL_COUNT):
+            cmd_data = trans_conn.recv()
+            if cmd_data['cmd'] == RouterControlCommand.TRANSCRIBE_MESSAGE_RESPONSE:
+                irc_conn.send({
+                    'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
+                    'msg': '<{}:audio~{:1.3f}> {}'.format(
+                        MMBL_USERS[cmd_data['actor']]['name'],
+                        cmd_data['result']['confidence'],
+                        cmd_data['result']['transcript'],
+                        ),
+                })
+            elif cmd_data['cmd'] == RouterControlCommand.TRANSCRIBE_COMMAND_RESPONSE:
+                pass
+            else:
+                log.warning('Unrecognized command from transcriber: %r', cmd_data)
+        
+        if master_conn.poll(POLL_TIMEOUT / POLL_COUNT):
+            cmd_data = master_conn.recv()
+            if cmd_data['cmd'] == RouterControlCommand.EXIT:
+                log.debug('Recieved EXIT command from master')
+                mmbl_conn.send({'cmd': MumbleControlCommand.EXIT})
+                irc_conn.send({'cmd': IrcControlCommand.EXIT})
+                trans_conn.send({'cmd': TranscriberControlCommand.EXIT})
+                keep_running = False
+            else:
+                log.warning('Unrecognized command from master: %r', cmd_data)
 
         for session_id, data in AUDIO_BUFFERS.items():
             user = MMBL_USERS[session_id]
-            if data['ping'] is not None and time.time() - data['ping'] > worker_config['wait_time']:
+            if data['last_sample'] is not None and (time.time() - data['last_sample']) > router_config['wait_time']:
                 log.debug('Triggering flush on user: %s', user['name'])
-                if (len(data['buffer']) * 20) / 1000 > worker_config['min_speech_length']:
-                    audio_buffer = b''.join(c.pcm for c in sorted(data['buffer'], key=lambda c: c.time))
-                    log.debug('Transcribing audio buffer of %d bytes', len(audio_buffer))
-                    result = transcribe(audio_buffer)
-                    if result:
-                        log.info('Transcription result: %s ~%1.3f => %s', user['name'], result['confidence'], result['transcript'])
-                        # mmbl_conn.send({'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
-                        #     'channel_id': user['channel_id'],
-                        #     'msg': '{} said: {}'.format(user['name'], result['transcript'],
-                        # )})
-                        irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
-                            'msg': '<{}:audio> {}'.format(user['name'], result['transcript'])})
-                    else:
-                        log.warning('Failed to transcribe audio from: %s', user['name'])
+                buf_dur = sum(c.duration for c in data['buffer'])
+                if buf_dur < router_config['min_buffer_len']:
+                    log.debug('Buffer is too short to transcribe: %1.2fs', buf_dur)
+                elif buf_dur > router_config['max_buffer_len']:
+                    log.debug('Buffer is too long to transcribe: %1.2fs', buf_dur)
+                    # TODO: break into smaller segments and queue those
                 else:
-                    log.debug('Flushing buffer that is too short to transcribe')
+                    txid = generate_uuid()
+                    audio_buffer = b''.join(c.pcm for c in sorted(data['buffer'], key=lambda c: c.sequence))
+                    log.debug('Queueing buffer: txid=%s len=%d bytes dur=%1.2fs', txid, len(audio_buffer), buf_dur)
+                    trans_conn.send({'cmd': TranscriberControlCommand.TRANSCRIBE_MESSAGE,
+                        'actor': user['session'],
+                        'buffer': audio_buffer,
+                        'phrases': [u['name'] for u in MMBL_USERS.values()],
+                        'txid': txid,
+                    })
 
                 data['buffer'].clear()
-                data['ping'] = None
+                data['last_sample'] = None
+    log.debug('Router process exiting')
 
-        if master_conn.poll(0.1):
-            if master_conn.recv():
-                keep_running = False
-    log.debug('Worker process exiting')
-
-def main(args):
+def main(args, **kwargs):
     stop_running = threading.Event()
 
     def handle_sigint(*args):
-        log.debug('Caught ^C, shutting down')
         stop_running.set()
     signal.signal(signal.SIGINT, handle_sigint)
+
+    if args.config is None:
+        log.error('-c/--config is required')
+        raise SystemExit()
 
     with open(args.config) as config_handle:
         config = yaml.safe_load(config_handle)
 
-    l, r = multiprocessing.Pipe()
-    u, d = multiprocessing.Pipe()
-    i, o = multiprocessing.Pipe()
+    mmbl_conn = QueuePipe()
+    irc_conn = QueuePipe()
+    trans_conn = QueuePipe()
+    router_conn = QueuePipe()
 
     try:
-        mmbl = proc_mmbl(config['mumble'], l)
+        mmbl = proc_mmbl(config['mumble'], mmbl_conn, pymumble_debug=kwargs['pymumble_debug'])
         mmbl.run()
     except AttributeError: pass
     try:
-        irc = proc_irc(config['irc'], u)
-        irc.run()
+        irc_proc = proc_irc(config['irc'], irc_conn)
+        irc_proc.run()
     except AttributeError: pass
     try:
-        worker = proc_worker(config['worker'], r, d, o)
-        worker.run()
+        transcriber = proc_transcriber(config['transcriber'], trans_conn)
+        transcriber.run()
+    except AttributeError: pass
+    try:
+        router = proc_router(config['router'], mmbl_conn, irc_conn, trans_conn, router_conn)
+        router.run()
     except AttributeError: pass
 
     log.debug('Entering sleep loop')
     while not stop_running.is_set():
-        time.sleep(1)
+        time.sleep(POLL_TIMEOUT)
+    log.debug('Caught ^C, shutting down')
 
-    r.send({'cmd': MumbleControlCommand.EXIT})
-    d.send({'cmd': IrcControlCommand.EXIT})
-    i.send(True)
+    router_conn.send({'cmd': RouterControlCommand.EXIT})
 
-    mmbl.join()
-    irc.join()
-    worker.join()
+    for p in [mmbl, irc_proc, transcriber, router]:
+        p.join(POLL_TIMEOUT * 2)
+        p.terminate()
 
     log.info('Shutdown complete')
 
@@ -324,7 +473,10 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('-c', '--config')
+    parser.add_argument('-c', '--config',
+        help='Path to config file',
+        default=None,
+    )
     parser.add_argument('-v', '--verbose',
         help='Log more messages',
         action='count', default=0,
@@ -339,6 +491,8 @@ if __name__ == '__main__':
         logging.INFO + (args.quiet * 10) - (args.verbose * 10)
     ))
     log.setLevel(LOG_LEVEL)
-    logging.getLogger().setLevel(LOG_LEVEL)
+    EXTRA_DEBUG = (args.verbose - args.quiet) > 1
+    if EXTRA_DEBUG:
+        logging.getLogger().setLevel(LOG_LEVEL)
 
-    main(args)
+    main(args, pymumble_debug=EXTRA_DEBUG)

@@ -1,28 +1,26 @@
 ---
 
-main:
-  irc_socket: sopel.sock
-
 mumble:
   server: localhost
+  port: 64738
   username: doty-bot
-  password: CHANGE ME
+  password: 'CHANGE ME'
 
 irc:
-  server: chat.freenode.net
-  port: 6697
-  ssl: True
-
+  server: localhost
+  port: 6667
   username: doty-bot
-  owner: CHANGE ME
+  channel: '#a_channel'
+  ssl: false
+  ssl_verify: false
 
-  channels:
-    - '#doty'
-
-worker:
-  speech_lang: en-US
-  google_cloud_auth: 'path/to/gcloud-creds.json'
+router:
   buffer_time: 30
-  wait_time: 2.0
-  min_speech_length: 0.5
+  wait_time: 1.5
+  min_buffer_len: 0.5
+  max_buffer_len: 60
+
+transcriber:
+  speech_lang: en-US
+  google_cloud_auth: path/to/creds.json
   hint_phrases: []
