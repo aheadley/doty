@@ -33,6 +33,7 @@ from pymumble_py3.errors import (
 import irc.client
 import irc.connection
 from bs4 import BeautifulSoup
+import contexttimer
 
 
 APP_NAME = 'doty'
@@ -62,7 +63,7 @@ def normalize_callback_args(callback_type, args):
         return ({
             'actor': args[0].actor,
             'channel_id': list(args[0].channel_id),
-            'message': args[0].message,
+            'message': BeautifulSoup(args[0].message.strip(), 'html.parser').get_text(),
         },)
     elif callback_type == PYMUMBLE_CLBK_USERREMOVED:
         return (dict(args[0]), {'session': args[1].session})
@@ -156,6 +157,7 @@ def proc_irc(irc_config, router_conn):
     else:
         conn_factory = irc.connection.Factory()
 
+    @contexttimer.timer(logger=log)
     def handle_irc_message(conn, event):
         log.debug('Recieved IRC event: %s', event)
 
@@ -189,6 +191,7 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
     POLL_COUNT = 1
     log = getWorkerLogger('mmbl', level=LOG_LEVEL)
     keep_running = True
+    clbk_lock = threading.Lock()
 
     log.debug('Starting mumble process')
     mmbl = pymumble.Mumble(mmbl_config['server'],
@@ -200,6 +203,7 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
     mmbl.set_receive_sound(True)
 
     log.debug('Setting up callbacks')
+    @contexttimer.timer(logger=log)
     def handle_callback(clbk_type, *args):
         args = normalize_callback_args(clbk_type, args)
         if clbk_type == PYMUMBLE_CLBK_SOUNDRECEIVED:
@@ -209,7 +213,8 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
             except Exception: pass
         else:
             log.debug('Callback event: %s => %r', clbk_type, args)
-        router_conn.send((clbk_type, args))
+        with clbk_lock:
+            router_conn.send((clbk_type, args))
 
     for callback_type in (v for k, v in globals().items() if k.startswith('PYMUMBLE_CLBK_')):
         clbk = denote_callback(callback_type)(handle_callback)
@@ -247,6 +252,9 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
                     mmbl.users.myself.move_in(target_channel['channel_id'])
             else:
                 log.warning('Unrecognized command: %r', cmd_data)
+        if not mmbl.is_alive():
+            log.error('Mumble connection has died')
+            keep_running = False
     log.debug('Mumble process exiting')
 
 @multiprocessify
@@ -258,6 +266,7 @@ def proc_transcriber(transcription_config, router_conn):
 
     speech_client = speech.SpeechClient.from_service_account_json(transcription_config['google_cloud_auth'])
 
+    @contexttimer.timer(logger=log)
     def transcribe(buf, phrases=[]):
         speech_content = types.RecognitionAudio(content=buf)
         speech_config = types.RecognitionConfig(
@@ -279,14 +288,17 @@ def proc_transcriber(transcription_config, router_conn):
     log.info('Transcriber running')
     while keep_running:
         if router_conn.poll(POLL_TIMEOUT / POLL_COUNT):
-            cmd_data = router_conn.recv()
-            log.debug('Recieved command: %r', cmd_data['cmd'])
+            with contexttimer.Timer() as t:
+                cmd_data = router_conn.recv()
+            log.debug('Recieved command (%fs): %r', t.elapsed, cmd_data['cmd'])
             if cmd_data['cmd'] == TranscriberControlCommand.EXIT:
                 log.debug('Recieved EXIT command from router')
                 keep_running = False
             elif cmd_data['cmd'] == TranscriberControlCommand.TRANSCRIBE_MESSAGE:
                 result = transcribe(cmd_data['buffer'], cmd_data['phrases'])
                 if result:
+                    log.info('Transcription result: txid=%s session=%d result=%r',
+                        cmd_data['txid'], cmd_data['actor'], result)
                     router_conn.send({
                         'cmd': RouterControlCommand.TRANSCRIBE_MESSAGE_RESPONSE,
                         'actor': cmd_data['actor'],
@@ -319,7 +331,9 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
     log.info('Router running')
     while keep_running:
         if mmbl_conn.poll(POLL_TIMEOUT / POLL_COUNT):
-            (event_type, event_args) = mmbl_conn.recv()
+            with contexttimer.Timer() as t:
+                (event_type, event_args) = mmbl_conn.recv()
+            log.debug('mmbl_conn.recv took: %fs', t.elapsed)
             if event_type != PYMUMBLE_CLBK_SOUNDRECEIVED:
                 # sound events are way too noisy
                 log.debug('Recieved event from mumble: %s => %r', event_type, event_args)
@@ -351,15 +365,14 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
             elif event_type == PYMUMBLE_CLBK_TEXTMESSAGERECEIVED:
                 msg_data = event_args[0]
                 sender = MMBL_USERS[msg_data['actor']]
-                clean_message = BeautifulSoup(msg_data['message'], 'html.parser').get_text().strip()
 
                 if msg_data['channel_id']:
                     irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
-                        'msg': '<{}:text> {}'.format(sender['name'], clean_message)})
+                        'msg': '<{}:text> {}'.format(sender['name'], msg_data['message'])})
 
                 # !moveto command
-                if clean_message.startswith('!moveto'):
-                    target_name = clean_message.split(' ', 1)[1]
+                if msg_data['message'].startswith('!moveto'):
+                    target_name = msg_data['message'].split(' ', 1)[1]
                     mmbl_conn.send({'cmd': MumbleControlCommand.MOVE_TO_CHANNEL, 'channel_name': target_name})
             elif event_type == PYMUMBLE_CLBK_SOUNDRECEIVED:
                 (sender, sound_chunk) = event_args
