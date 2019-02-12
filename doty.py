@@ -398,13 +398,16 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
     trans_conn._swap()
     speak_conn._swap()
 
-    def say(msg, source_id=None):
+    def say(msg, source_id=0):
         return speak_conn.send({
             'cmd': SpeakerControlCommand.SPEAK_MESSAGE,
             'msg': msg,
             'actor': source_id,
             'txid': generate_uuid(),
             })
+
+    if router_config['startup_message']:
+        say(router_config['startup_message'])
 
     log.info('Router running')
     while keep_running:
@@ -516,6 +519,10 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                     cmd_data['txid'], cmd_data['actor'], len(cmd_data['buffer']))
                 cmd_data['cmd'] = MumbleControlCommand.SEND_AUDIO_MSG
                 mmbl_conn.send(cmd_data)
+                irc_conn.send({
+                    'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
+                    'msg': cmd_data['msg'],
+                })
             else:
                 log.warning('Unrecognized command from speaker: %r', cmd_data)
 
