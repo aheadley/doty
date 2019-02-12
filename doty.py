@@ -417,7 +417,11 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
             cmd_data = trans_conn.recv()
             if cmd_data['cmd'] == RouterControlCommand.TRANSCRIBE_MESSAGE_RESPONSE:
                 log.debug('Recieved transcription result for: txid=%s', cmd_data['txid'])
-                sender = MMBL_USERS[cmd_data['actor']]
+                try:
+                    sender = MMBL_USERS[cmd_data['actor']]
+                except KeyError:
+                    log.warning('Sender has disappeared: actor=%d', cmd_data['actor'])
+                    sender = {'name': 'ghost:{:d}'.format(cmd_data['actor'])}
                 irc_conn.send({
                     'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
                     'msg': '<{}> {}'.format(
