@@ -37,6 +37,7 @@ APP_NAME = 'doty'
 LOG_LEVEL = logging.INFO
 POLL_TIMEOUT = 0.01
 ZW_SPACE = u'\u200B'
+WAV_HEADER_LEN = 44
 
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 logging.basicConfig(level=LOG_LEVEL)
@@ -289,7 +290,7 @@ def proc_transcriber(transcription_config, router_conn):
         speech_config = gcloud_speech.types.RecognitionConfig(
             encoding=gcloud_speech.enums.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=48000,
-            language_code=transcription_config['speech_lang'],
+            language_code=transcription_config['language'],
             speech_contexts=[gcloud_speech.types.SpeechContext(phrases=phrases \
                 + transcription_config['hint_phrases'])],
         )
@@ -351,7 +352,7 @@ def proc_speaker(speaker_config, router_conn):
     def speak(text):
         text_input = gcloud_texttospeech.types.SynthesisInput(text=text)
         response = tts_client.synthesize_speech(text_input, tts_voice, tts_config)
-        return response.audio_content
+        return response.audio_content[WAV_HEADER_LEN:]
 
     log.info('Speaker running')
     while keep_running:
@@ -361,14 +362,20 @@ def proc_speaker(speaker_config, router_conn):
                 log.debug('Recieved EXIT command from router')
                 keep_running = False
             elif cmd_data['cmd'] == SpeakerControlCommand.SPEAK_MESSAGE:
+                log.debug('Recieved speaker request: txid=%s session=%d msg=%s',
+                    cmd_data['txid'], cmd_data['actor'], cmd_data['msg'])
                 try:
                     audio = speak(cmd_data['msg'])
                 except Exception as err:
                     log.exception(err)
                 else:
+                    log.info('Speaker result: txid=%s session=%d buffer[]=%d',
+                        cmd_data['txid'], cmd_data['actor'], len(audio))
                     router_conn.send({
                         'cmd': RouterControlCommand.SPEAK_MESSAGE_RESPONSE,
                         'buffer': audio,
+                        'msg': cmd_data['msg'],
+                        'actor': cmd_data['actor'],
                         'txid': cmd_data['txid'],
                     })
             else:
@@ -391,10 +398,11 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
     trans_conn._swap()
     speak_conn._swap()
 
-    def say(msg):
+    def say(msg, source_id=None):
         return speak_conn.send({
             'cmd': SpeakerControlCommand.SPEAK_MESSAGE,
             'msg': msg,
+            'actor': source_id,
             'txid': generate_uuid(),
             })
 
@@ -450,24 +458,28 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
             elif event_type == PYMUMBLE_CLBK_TEXTMESSAGERECEIVED:
                 msg_data = event_args[0]
                 sender = MMBL_USERS[msg_data['actor']]
+                if sender['name'] in router_config['ignore']:
+                    log.info('Ignoring text message from user: %s', sender['name'])
+                else:
+                    if msg_data['channel_id']:
+                        irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
+                            'msg': '<{}> {}'.format(
+                                denotify_username(sender['name']),
+                                msg_data['message'])})
+                        # TODO: remove this
+                        say(msg_data['message'], source_id=sender['session'])
 
-                if msg_data['channel_id']:
-                    irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
-                        'msg': '<{}> {}'.format(
-                            denotify_username(sender['name']),
-                            msg_data['message'])})
-                    say(msg_data['message'])
-
-                # !moveto command
-                if msg_data['message'].startswith('!moveto'):
-                    target_name = msg_data['message'].split(' ', 1)[1]
-                    mmbl_conn.send({'cmd': MumbleControlCommand.MOVE_TO_CHANNEL, 'channel_name': target_name})
+                    # !moveto command
+                    if msg_data['message'].startswith('!moveto'):
+                        target_name = msg_data['message'].split(' ', 1)[1]
+                        mmbl_conn.send({'cmd': MumbleControlCommand.MOVE_TO_CHANNEL, 'channel_name': target_name})
             elif event_type == PYMUMBLE_CLBK_SOUNDRECEIVED:
                 (sender, sound_chunk) = event_args
-                if AUDIO_BUFFERS[sender['session']]['last_sample'] is None:
-                    log.debug('Started recieving audio for: %s', sender['name'])
-                AUDIO_BUFFERS[sender['session']]['buffer'].append(sound_chunk)
-                AUDIO_BUFFERS[sender['session']]['last_sample'] = time.time()
+                if sender['name'] not in router_config['ignore']:
+                    if AUDIO_BUFFERS[sender['session']]['last_sample'] is None:
+                        log.debug('Started recieving audio for: %s', sender['name'])
+                    AUDIO_BUFFERS[sender['session']]['buffer'].append(sound_chunk)
+                    AUDIO_BUFFERS[sender['session']]['last_sample'] = time.time()
             else:
                 log.warning('Unrecognized mumble event type: %s => %r', event_type, event_args)
 
@@ -495,11 +507,10 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
         if speak_conn.poll(POLL_TIMEOUT / POLL_COUNT):
             cmd_data = speak_conn.recv()
             if cmd_data['cmd'] == RouterControlCommand.SPEAK_MESSAGE_RESPONSE:
-                log.debug('Got speaker response: len=%db type=%s', len(cmd_data['buffer']), type(cmd_data['buffer']))
-                mmbl_conn.send({
-                    'cmd': MumbleControlCommand.SEND_AUDIO_MSG,
-                    'buffer': cmd_data['buffer'],
-                    })
+                log.debug('Got speaker response: txid=%s actor=%d len=%d b',
+                    cmd_data['txid'], cmd_data['actor'], len(cmd_data['buffer']))
+                cmd_data['cmd'] = MumbleControlCommand.SEND_AUDIO_MSG
+                mmbl_conn.send(cmd_data)
             else:
                 log.warning('Unrecognized command from speaker: %r', cmd_data)
 

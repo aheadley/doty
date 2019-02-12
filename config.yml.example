@@ -10,7 +10,7 @@ irc:
   server: localhost
   port: 6667
   username: doty-bot
-  channel: '#a_channel'
+  channel: '#example'
   ssl: false
   ssl_verify: false
 
@@ -19,8 +19,19 @@ router:
   wait_time: 1.5
   min_buffer_len: 0.5
   max_buffer_len: 60
+  ignore: []
 
 transcriber:
-  speech_lang: en-US
-  google_cloud_auth: path/to/creds.json
+  language: en-US
+  google_cloud_auth: 'path/to/creds.json'  
   hint_phrases: []
+
+speaker:
+  language: en-US
+  google_cloud_auth: 'path/to/creds.json'  
+  # https://cloud.google.com/text-to-speech/docs/voices
+  voice: en-US-Wavenet-E
+  # https://cloud.google.com/text-to-speech/docs/audio-profiles
+  effect_profiles:
+    - handset-class-device
+  sample_rate: 48000
