@@ -15,24 +15,32 @@ irc:
   ssl_verify: false
 
 router:
+  # the word or phrase to signal a voice command, think "ok google" or "alexa"
   activation_word: doty
+  # how long to wait after the last audio packet recieved from a user before
+  # sending the audio off for transcription
   wait_time: 1.5
+  # the minimum length of an audio clip to bother transcribing, note that google
+  # bills in 15s increments: https://cloud.google.com/speech-to-text/pricing
   min_buffer_len: 0.5
-  max_buffer_len: 60
+  # username/nicks to ignore in IRC and Mumble, applies to both text and audio
   ignore: []
+  # This will be spoken at bot startup, set to false or '' (empty string) to disable
+  # https://www.youtube.com/watch?v=QrWAdq8e_uA
   startup_message: Reactor Online. Sensors Online. Weapons Online. All Systems Nominal.
 
 transcriber:
+  google_cloud_auth: 'path/to/creds.json'
+  # https://cloud.google.com/speech-to-text/docs/languages
   language: en-US
-  google_cloud_auth: 'path/to/creds.json'  
+  # an optional, extra vocabulary to help Google recognize spoken words
   hint_phrases: []
 
 speaker:
-  language: en-US
-  google_cloud_auth: 'path/to/creds.json'  
+  google_cloud_auth: 'path/to/creds.json'
   # https://cloud.google.com/text-to-speech/docs/voices
+  language: en-US
   voice: en-US-Wavenet-E
   # https://cloud.google.com/text-to-speech/docs/audio-profiles
   effect_profiles:
     - handset-class-device
-  sample_rate: 48000

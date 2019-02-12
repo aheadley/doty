@@ -37,7 +37,10 @@ APP_NAME = 'doty'
 LOG_LEVEL = logging.INFO
 POLL_TIMEOUT = 0.01
 ZW_SPACE = u'\u200B'
+# https://www.isip.piconepress.com/projects/speech/software/tutorials/production/fundamentals/v1.0/section_02/s02_01_p05.html
 WAV_HEADER_LEN = 44
+# https://cloud.google.com/speech-to-text/quotas
+MAX_TRANSCRIPTION_TIME = 60.0
 
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 logging.basicConfig(level=LOG_LEVEL)
@@ -344,7 +347,7 @@ def proc_speaker(speaker_config, router_conn):
     )
     tts_config = gcloud_texttospeech.types.AudioConfig(
         audio_encoding=gcloud_texttospeech.enums.AudioEncoding.LINEAR16,
-        sample_rate_hertz=speaker_config['sample_rate'],
+        sample_rate_hertz=PYMUMBLE_SAMPLERATE,
         effects_profile_id=speaker_config['effect_profiles'],
     )
 
@@ -423,8 +426,9 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                 user_data = event_args[0]
                 MMBL_USERS[user_data['session']] = user_data
                 AUDIO_BUFFERS[user_data['session']] = {
-                    'buffer': collections.deque(),
-                    'last_sample': None
+                    'buffer': collections.deque(
+                        maxlen=int(MAX_TRANSCRIPTION_TIME / PYMUMBLE_AUDIO_PER_PACKET) - 1),
+                    'last_sample': None,
                 }
                 irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_ACTION,
                     'msg': '{} has connected in channel: {}'.format(
@@ -479,11 +483,12 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                         say(say_msg, source_id=sender['session'])
             elif event_type == PYMUMBLE_CLBK_SOUNDRECEIVED:
                 (sender, sound_chunk) = event_args
+                sender_data = AUDIO_BUFFERS[sender['session']]
                 if sender['name'] not in router_config['ignore']:
-                    if AUDIO_BUFFERS[sender['session']]['last_sample'] is None:
+                    if sender_data['last_sample'] is None and len(sender_data['buffer']) == 0:
                         log.debug('Started recieving audio for: %s', sender['name'])
-                    AUDIO_BUFFERS[sender['session']]['buffer'].append(sound_chunk)
-                    AUDIO_BUFFERS[sender['session']]['last_sample'] = time.time()
+                    sender_data['buffer'].append(sound_chunk)
+                    sender_data['last_sample'] = time.time()
             else:
                 log.warning('Unrecognized mumble event type: %s => %r', event_type, event_args)
 
@@ -540,27 +545,39 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
 
         for session_id, data in AUDIO_BUFFERS.items():
             user = MMBL_USERS[session_id]
-            if data['last_sample'] is not None and (time.time() - data['last_sample']) > router_config['wait_time']:
-                log.debug('Triggering flush on user: %s', user['name'])
+            if data['last_sample'] is not None:
                 buf_dur = sum(c.duration for c in data['buffer'])
-                if buf_dur < router_config['min_buffer_len']:
-                    log.debug('Buffer is too short to transcribe: %1.2fs', buf_dur)
-                elif buf_dur > router_config['max_buffer_len']:
-                    log.debug('Buffer is too long to transcribe: %1.2fs', buf_dur)
-                    # TODO: break into smaller segments and queue those
-                else:
+                if len(data['buffer']) == data['buffer'].maxlen:
+                    log.debug('Buffer is full, flushing: %s dur=%1.2fs',
+                        user['name'], MAX_TRANSCRIPTION_TIME)
                     txid = generate_uuid()
                     audio_buffer = b''.join(c.pcm for c in sorted(data['buffer'], key=lambda c: c.sequence))
-                    log.debug('Queueing buffer: txid=%s len=%d bytes dur=%1.2fs', txid, len(audio_buffer), buf_dur)
+                    log.debug('Queueing partial buffer: txid=%s len=%d bytes dur=%1.2fs', txid, len(audio_buffer), buf_dur)
                     trans_conn.send({'cmd': TranscriberControlCommand.TRANSCRIBE_MESSAGE,
                         'actor': user['session'],
                         'buffer': audio_buffer,
                         'phrases': [u['name'] for u in MMBL_USERS.values()] + [router_config['activation_word']],
                         'txid': txid,
                     })
+                    data['buffer'].clear()
 
-                data['buffer'].clear()
-                data['last_sample'] = None
+                elif (time.time() - data['last_sample']) > router_config['wait_time']:
+                    log.debug('Buffer has expired, flushing: %s dur=%1.2fs',
+                        user['name'], buf_dur)
+                    if buf_dur < router_config['min_buffer_len']:
+                        log.debug('Buffer is too short to transcribe: %1.2fs', buf_dur)
+                    else:
+                        txid = generate_uuid()
+                        audio_buffer = b''.join(c.pcm for c in sorted(data['buffer'], key=lambda c: c.sequence))
+                        log.debug('Queueing buffer: txid=%s len=%d bytes dur=%1.2fs', txid, len(audio_buffer), buf_dur)
+                        trans_conn.send({'cmd': TranscriberControlCommand.TRANSCRIBE_MESSAGE,
+                            'actor': user['session'],
+                            'buffer': audio_buffer,
+                            'phrases': [u['name'] for u in MMBL_USERS.values()] + [router_config['activation_word']],
+                            'txid': txid,
+                        })
+                    data['buffer'].clear()
+                    data['last_sample'] = None
     log.debug('Router process exiting')
 
 def main(args, **kwargs):
