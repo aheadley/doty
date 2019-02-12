@@ -38,7 +38,8 @@ import contexttimer
 
 APP_NAME = 'doty'
 LOG_LEVEL = logging.INFO
-POLL_TIMEOUT = 0.1
+POLL_TIMEOUT = 0.01
+ZW_SPACE = u'\u200B'
 
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 logging.basicConfig(level=LOG_LEVEL)
@@ -80,6 +81,12 @@ def denote_callback(clbk_type):
 
 def generate_uuid():
     return str(uuid.uuid1())
+
+def denotify_username(username):
+    if len(username) > 1:
+        return ZW_SPACE.join([username[0], username[1:-1], username[-1]]).replace(ZW_SPACE * 2, ZW_SPACE)
+    else:
+        return username
 
 class QueuePipe:
     def __init__(self):
@@ -127,6 +134,7 @@ class MumbleControlCommand(Enum):
 class IrcControlCommand(Enum):
     EXIT = auto()
     SEND_CHANNEL_TEXT_MSG = auto()
+    SEND_CHANNEL_ACTION = auto()
 
 class TranscriberControlCommand(Enum):
     EXIT = auto()
@@ -157,12 +165,15 @@ def proc_irc(irc_config, router_conn):
     else:
         conn_factory = irc.connection.Factory()
 
-    @contexttimer.timer(logger=log)
+    # @contexttimer.timer(logger=log)
     def handle_irc_message(conn, event):
         log.debug('Recieved IRC event: %s', event)
 
     client.add_global_handler('pubmsg', handle_irc_message)
     client.add_global_handler('privmsg', handle_irc_message)
+    client.add_global_handler('pubnotice', handle_irc_message)
+    client.add_global_handler('privnotice', handle_irc_message)
+    client.add_global_handler('action', handle_irc_message)
 
     log.info('IRC client running')
     while keep_running:
@@ -182,6 +193,8 @@ def proc_irc(irc_config, router_conn):
                 keep_running = False
             elif cmd_data['cmd'] == IrcControlCommand.SEND_CHANNEL_TEXT_MSG:
                 server.privmsg(irc_config['channel'], cmd_data['msg'])
+            elif cmd_data['cmd'] == IrcControlCommand.SEND_CHANNEL_ACTION:
+                server.action(irc_config['channel'], cmd_data['msg'])
             else:
                 log.warning('Unrecognized command: %r', cmd_data)
     log.debug('IRC process exiting')
@@ -203,7 +216,7 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
     mmbl.set_receive_sound(True)
 
     log.debug('Setting up callbacks')
-    @contexttimer.timer(logger=log)
+    # @contexttimer.timer(logger=log)
     def handle_callback(clbk_type, *args):
         args = normalize_callback_args(clbk_type, args)
         if clbk_type == PYMUMBLE_CLBK_SOUNDRECEIVED:
@@ -283,7 +296,7 @@ def proc_transcriber(transcription_config, router_conn):
                     'transcript': alternative.transcript,
                     'confidence': alternative.confidence,
                 }
-        return None                
+        return None
 
     log.info('Transcriber running')
     while keep_running:
@@ -333,7 +346,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
         if mmbl_conn.poll(POLL_TIMEOUT / POLL_COUNT):
             with contexttimer.Timer() as t:
                 (event_type, event_args) = mmbl_conn.recv()
-            log.debug('mmbl_conn.recv took: %fs', t.elapsed)
+            # log.debug('mmbl_conn.recv took: %fs', t.elapsed)
             if event_type != PYMUMBLE_CLBK_SOUNDRECEIVED:
                 # sound events are way too noisy
                 log.debug('Recieved event from mumble: %s => %r', event_type, event_args)
@@ -346,13 +359,28 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
                     'buffer': collections.deque(),
                     'last_sample': None
                 }
+                irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_ACTION,
+                    'msg': '{} has connected in channel: {}'.format(
+                        denotify_username(user_data['name']),
+                        MMBL_CHANNELS[user_data['channel_id']]['name'],
+                        )})
             elif event_type == PYMUMBLE_CLBK_USERUPDATED:
                 (user_data, changes) = event_args
                 MMBL_USERS[user_data['session']].update(changes)
+                if 'channel_id' in changes:
+                    irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_ACTION,
+                        'msg': '{} has joined channel: {}'.format(
+                            denotify_username(user_data['name']),
+                            MMBL_CHANNELS[user_data['channel_id']]['name'],
+                            )})
             elif event_type == PYMUMBLE_CLBK_USERREMOVED:
                 (user_data, session_data) = event_args
                 del MMBL_USERS[user_data['session']]
                 del AUDIO_BUFFERS[user_data['session']]
+                irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_ACTION,
+                    'msg': '{} has disconnected'.format(
+                        denotify_username(user_data['name']),
+                        )})
             elif event_type == PYMUMBLE_CLBK_CHANNELCREATED:
                 channel_data = event_args[0]
                 MMBL_CHANNELS[channel_data['channel_id']] = channel_data
@@ -368,7 +396,9 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
 
                 if msg_data['channel_id']:
                     irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
-                        'msg': '<{}:text> {}'.format(sender['name'], msg_data['message'])})
+                        'msg': '<{}> {}'.format(
+                            denotify_username(sender['name']),
+                            msg_data['message'])})
 
                 # !moveto command
                 if msg_data['message'].startswith('!moveto'):
@@ -387,11 +417,11 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
             cmd_data = trans_conn.recv()
             if cmd_data['cmd'] == RouterControlCommand.TRANSCRIBE_MESSAGE_RESPONSE:
                 log.debug('Recieved transcription result for: txid=%s', cmd_data['txid'])
+                sender = MMBL_USERS[cmd_data['actor']]
                 irc_conn.send({
                     'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
-                    'msg': '<{}:audio~{:1.3f}> {}'.format(
-                        MMBL_USERS[cmd_data['actor']]['name'],
-                        cmd_data['result']['confidence'],
+                    'msg': '<{}> {}'.format(
+                        denotify_username(sender['name']),
                         cmd_data['result']['transcript'],
                         ),
                 })
@@ -399,7 +429,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
                 pass
             else:
                 log.warning('Unrecognized command from transcriber: %r', cmd_data)
-        
+
         if master_conn.poll(POLL_TIMEOUT / POLL_COUNT):
             cmd_data = master_conn.recv()
             if cmd_data['cmd'] == RouterControlCommand.EXIT:
