@@ -15,7 +15,7 @@ irc:
   ssl_verify: false
 
 router:
-  buffer_time: 30
+  activation_word: doty
   wait_time: 1.5
   min_buffer_len: 0.5
   max_buffer_len: 60

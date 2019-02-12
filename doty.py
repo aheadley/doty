@@ -420,7 +420,6 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                 user_data = event_args[0]
                 MMBL_USERS[user_data['session']] = user_data
                 AUDIO_BUFFERS[user_data['session']] = {
-                    # 'buffer': collections.deque(maxlen=(router_config['buffer_time'] * 1000) // 20),
                     'buffer': collections.deque(),
                     'last_sample': None
                 }
@@ -466,13 +465,15 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                             'msg': '<{}> {}'.format(
                                 denotify_username(sender['name']),
                                 msg_data['message'])})
-                        # TODO: remove this
-                        say(msg_data['message'], source_id=sender['session'])
 
                     # !moveto command
                     if msg_data['message'].startswith('!moveto'):
-                        target_name = msg_data['message'].split(' ', 1)[1]
+                        target_name = msg_data['message'].split(' ', 1)[1].strip()
                         mmbl_conn.send({'cmd': MumbleControlCommand.MOVE_TO_CHANNEL, 'channel_name': target_name})
+                    # !say command
+                    if msg_data['message'].startswith('!say'):
+                        say_msg = msg_data['message'].split(' ', 1)[1].strip()
+                        say(say_msg, source_id=sender['session'])
             elif event_type == PYMUMBLE_CLBK_SOUNDRECEIVED:
                 (sender, sound_chunk) = event_args
                 if sender['name'] not in router_config['ignore']:
@@ -499,6 +500,10 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                         cmd_data['result']['transcript'],
                         ),
                 })
+                cmd_msg = cmd_data['result']['transcript'].strip()
+                if cmd_msg.lower().startswith(router_config['activation_word'].lower()):
+                    log.debug('Found possible voice command: %s', cmd_msg)
+
             elif cmd_data['cmd'] == RouterControlCommand.TRANSCRIBE_COMMAND_RESPONSE:
                 pass
             else:
@@ -543,7 +548,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                     trans_conn.send({'cmd': TranscriberControlCommand.TRANSCRIBE_MESSAGE,
                         'actor': user['session'],
                         'buffer': audio_buffer,
-                        'phrases': [u['name'] for u in MMBL_USERS.values()],
+                        'phrases': [u['name'] for u in MMBL_USERS.values()] + [router_config['activation_word']],
                         'txid': txid,
                     })
 
@@ -571,26 +576,37 @@ def main(args, **kwargs):
     speak_conn = QueuePipe()
     router_conn = QueuePipe()
 
+    running_procs = []
+
     try:
-        mmbl = proc_mmbl(config['mumble'], mmbl_conn, pymumble_debug=kwargs['pymumble_debug'])
-        mmbl.run()
+        if not args.no_mumble:
+            mmbl = proc_mmbl(config['mumble'], mmbl_conn, pymumble_debug=kwargs['pymumble_debug'])
+            mmbl.run()
+            running_procs.append(mmbl)
     except AttributeError: pass
     try:
-        irc_proc = proc_irc(config['irc'], irc_conn)
-        irc_proc.run()
+        if not args.no_irc:
+            irc_proc = proc_irc(config['irc'], irc_conn)
+            irc_proc.run()
+            running_procs.append(irc_proc)
     except AttributeError: pass
     try:
-        transcriber = proc_transcriber(config['transcriber'], trans_conn)
-        transcriber.run()
+        if not args.no_transcriber:
+            transcriber = proc_transcriber(config['transcriber'], trans_conn)
+            transcriber.run()
+            running_procs.append(transcriber)
     except AttributeError: pass
     try:
-        speaker = proc_speaker(config['speaker'], speak_conn)
-        speaker.run()
+        if not args.no_speaker:
+            speaker = proc_speaker(config['speaker'], speak_conn)
+            speaker.run()
+            running_procs.append(speaker)
     except AttributeError: pass
     try:
         router = proc_router(config['router'], mmbl_conn, irc_conn, trans_conn,
             speak_conn, router_conn)
         router.run()
+        running_procs.append(router)
     except AttributeError: pass
 
     log.debug('Entering sleep loop')
@@ -600,7 +616,7 @@ def main(args, **kwargs):
 
     router_conn.send({'cmd': RouterControlCommand.EXIT})
 
-    for p in [mmbl, irc_proc, transcriber, speaker, router]:
+    for p in running_procs:
         p.join(POLL_TIMEOUT * 2)
         p.terminate()
 
@@ -622,6 +638,11 @@ if __name__ == '__main__':
         help='Log fewer messages',
         action='count', default=0,
     )
+    for proc_type in ['mumble', 'irc', 'transcriber', 'speaker']:
+        parser.add_argument('--no-{}'.format(proc_type),
+            help='Do not start the {} process'.format(proc_type),
+            action='store_true', default=False,
+        )
     args = parser.parse_args()
 
     LOG_LEVEL = min(logging.CRITICAL, max(logging.DEBUG,
