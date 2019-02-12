@@ -20,6 +20,7 @@ router:
   min_buffer_len: 0.5
   max_buffer_len: 60
   ignore: []
+  startup_message: Reactor Online. Sensors Online. Weapons Online. All Systems Nominal.
 
 transcriber:
   language: en-US
