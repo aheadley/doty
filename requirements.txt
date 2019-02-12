@@ -6,3 +6,4 @@ irc==17.0
 opuslib==2.0.0
 protobuf==3.6.1
 PyYAML==3.13
+google-cloud-texttospeech==0.4.0

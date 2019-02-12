@@ -19,11 +19,8 @@ from enum import (
     auto,
 )
 
-from google.cloud import speech
-from google.cloud.speech import (
-    enums,
-    types,
-)
+from google.cloud import speech as gcloud_speech
+from google.cloud import texttospeech as gcloud_texttospeech
 import pymumble_py3 as pymumble
 import yaml
 from pymumble_py3.constants import *
@@ -141,10 +138,15 @@ class TranscriberControlCommand(Enum):
     TRANSCRIBE_MESSAGE = auto()
     TRANSCRIBE_COMMAND = auto()
 
+class SpeakerControlCommand(Enum):
+    EXIT = auto()
+    SPEAK_MESSAGE = auto()
+
 class RouterControlCommand(Enum):
     EXIT = auto()
     TRANSCRIBE_MESSAGE_RESPONSE = auto()
     TRANSCRIBE_COMMAND_RESPONSE = auto()
+    SPEAK_MESSAGE_RESPONSE = auto()
 
 @multiprocessify
 def proc_irc(irc_config, router_conn):
@@ -242,7 +244,6 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
     while keep_running:
         if router_conn.poll(POLL_TIMEOUT):
             cmd_data = router_conn.recv()
-            log.debug('Recieved control command: %r', cmd_data)
             if cmd_data['cmd'] == MumbleControlCommand.EXIT:
                 log.debug('Recieved exit command from router')
                 keep_running = False
@@ -263,6 +264,9 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
                     mmbl.channels.new_channel(0, cmd_data['channel_name'])
                 else:
                     mmbl.users.myself.move_in(target_channel['channel_id'])
+            elif cmd_data['cmd'] == MumbleControlCommand.SEND_AUDIO_MSG:
+                log.debug('Sending audio message: %d bytes', len(cmd_data['buffer']))
+                mmbl.sound_output.add_sound(cmd_data['buffer'])
             else:
                 log.warning('Unrecognized command: %r', cmd_data)
         if not mmbl.is_alive():
@@ -277,16 +281,16 @@ def proc_transcriber(transcription_config, router_conn):
     keep_running = True
     log.debug('Transcribing starting up')
 
-    speech_client = speech.SpeechClient.from_service_account_json(transcription_config['google_cloud_auth'])
+    speech_client = gcloud_speech.SpeechClient.from_service_account_json(transcription_config['google_cloud_auth'])
 
     @contexttimer.timer(logger=log)
     def transcribe(buf, phrases=[]):
-        speech_content = types.RecognitionAudio(content=buf)
-        speech_config = types.RecognitionConfig(
-            encoding=enums.RecognitionConfig.AudioEncoding.LINEAR16,
+        speech_content = gcloud_speech.types.RecognitionAudio(content=buf)
+        speech_config = gcloud_speech.types.RecognitionConfig(
+            encoding=gcloud_speech.enums.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=48000,
             language_code=transcription_config['speech_lang'],
-            speech_contexts=[types.SpeechContext(phrases=phrases \
+            speech_contexts=[gcloud_speech.types.SpeechContext(phrases=phrases \
                 + transcription_config['hint_phrases'])],
         )
         response = speech_client.recognize(speech_config, speech_content)
@@ -301,9 +305,7 @@ def proc_transcriber(transcription_config, router_conn):
     log.info('Transcriber running')
     while keep_running:
         if router_conn.poll(POLL_TIMEOUT / POLL_COUNT):
-            with contexttimer.Timer() as t:
-                cmd_data = router_conn.recv()
-            log.debug('Recieved command (%fs): %r', t.elapsed, cmd_data['cmd'])
+            cmd_data = router_conn.recv()
             if cmd_data['cmd'] == TranscriberControlCommand.EXIT:
                 log.debug('Recieved EXIT command from router')
                 keep_running = False
@@ -327,8 +329,55 @@ def proc_transcriber(transcription_config, router_conn):
     log.debug('Transcriber process exiting')
 
 @multiprocessify
-def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
-    POLL_COUNT = 3
+def proc_speaker(speaker_config, router_conn):
+    POLL_COUNT = 1
+    log = getWorkerLogger('speaker', level=LOG_LEVEL)
+    keep_running = True
+    log.debug('Speaker starting up')
+
+    tts_client = gcloud_texttospeech.TextToSpeechClient.from_service_account_json(speaker_config['google_cloud_auth'])
+    tts_voice = gcloud_texttospeech.types.VoiceSelectionParams(
+        language_code=speaker_config['language'],
+        name=speaker_config['voice'],
+
+    )
+    tts_config = gcloud_texttospeech.types.AudioConfig(
+        audio_encoding=gcloud_texttospeech.enums.AudioEncoding.LINEAR16,
+        sample_rate_hertz=speaker_config['sample_rate'],
+        effects_profile_id=speaker_config['effect_profiles'],
+    )
+
+    @contexttimer.timer(logger=log)
+    def speak(text):
+        text_input = gcloud_texttospeech.types.SynthesisInput(text=text)
+        response = tts_client.synthesize_speech(text_input, tts_voice, tts_config)
+        return response.audio_content
+
+    log.info('Speaker running')
+    while keep_running:
+        if router_conn.poll(POLL_TIMEOUT / POLL_COUNT):
+            cmd_data = router_conn.recv()
+            if cmd_data['cmd'] == SpeakerControlCommand.EXIT:
+                log.debug('Recieved EXIT command from router')
+                keep_running = False
+            elif cmd_data['cmd'] == SpeakerControlCommand.SPEAK_MESSAGE:
+                try:
+                    audio = speak(cmd_data['msg'])
+                except Exception as err:
+                    log.exception(err)
+                else:
+                    router_conn.send({
+                        'cmd': RouterControlCommand.SPEAK_MESSAGE_RESPONSE,
+                        'buffer': audio,
+                        'txid': cmd_data['txid'],
+                    })
+            else:
+                log.warning('Unrecognized command: %r', cmd_data)
+    log.debug('Speaker process exiting')
+
+@multiprocessify
+def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, master_conn):
+    POLL_COUNT = 4
     log = getWorkerLogger('router', level=LOG_LEVEL)
     keep_running = True
     log.debug('Router starting up')
@@ -340,6 +389,14 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
     mmbl_conn._swap()
     irc_conn._swap()
     trans_conn._swap()
+    speak_conn._swap()
+
+    def say(msg):
+        return speak_conn.send({
+            'cmd': SpeakerControlCommand.SPEAK_MESSAGE,
+            'msg': msg,
+            'txid': generate_uuid(),
+            })
 
     log.info('Router running')
     while keep_running:
@@ -399,6 +456,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
                         'msg': '<{}> {}'.format(
                             denotify_username(sender['name']),
                             msg_data['message'])})
+                    say(msg_data['message'])
 
                 # !moveto command
                 if msg_data['message'].startswith('!moveto'):
@@ -434,6 +492,17 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
             else:
                 log.warning('Unrecognized command from transcriber: %r', cmd_data)
 
+        if speak_conn.poll(POLL_TIMEOUT / POLL_COUNT):
+            cmd_data = speak_conn.recv()
+            if cmd_data['cmd'] == RouterControlCommand.SPEAK_MESSAGE_RESPONSE:
+                log.debug('Got speaker response: len=%db type=%s', len(cmd_data['buffer']), type(cmd_data['buffer']))
+                mmbl_conn.send({
+                    'cmd': MumbleControlCommand.SEND_AUDIO_MSG,
+                    'buffer': cmd_data['buffer'],
+                    })
+            else:
+                log.warning('Unrecognized command from speaker: %r', cmd_data)
+
         if master_conn.poll(POLL_TIMEOUT / POLL_COUNT):
             cmd_data = master_conn.recv()
             if cmd_data['cmd'] == RouterControlCommand.EXIT:
@@ -441,6 +510,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, master_conn):
                 mmbl_conn.send({'cmd': MumbleControlCommand.EXIT})
                 irc_conn.send({'cmd': IrcControlCommand.EXIT})
                 trans_conn.send({'cmd': TranscriberControlCommand.EXIT})
+                speak_conn.send({'cmd': SpeakerControlCommand.EXIT})
                 keep_running = False
             else:
                 log.warning('Unrecognized command from master: %r', cmd_data)
@@ -487,6 +557,7 @@ def main(args, **kwargs):
     mmbl_conn = QueuePipe()
     irc_conn = QueuePipe()
     trans_conn = QueuePipe()
+    speak_conn = QueuePipe()
     router_conn = QueuePipe()
 
     try:
@@ -502,7 +573,12 @@ def main(args, **kwargs):
         transcriber.run()
     except AttributeError: pass
     try:
-        router = proc_router(config['router'], mmbl_conn, irc_conn, trans_conn, router_conn)
+        speaker = proc_speaker(config['speaker'], speak_conn)
+        speaker.run()
+    except AttributeError: pass
+    try:
+        router = proc_router(config['router'], mmbl_conn, irc_conn, trans_conn,
+            speak_conn, router_conn)
         router.run()
     except AttributeError: pass
 
@@ -513,7 +589,7 @@ def main(args, **kwargs):
 
     router_conn.send({'cmd': RouterControlCommand.EXIT})
 
-    for p in [mmbl, irc_proc, transcriber, router]:
+    for p in [mmbl, irc_proc, transcriber, speaker, router]:
         p.join(POLL_TIMEOUT * 2)
         p.terminate()
 
