@@ -6,6 +6,7 @@ import subprocess
 import multiprocessing
 import threading
 import functools
+import hashlib
 import os
 import os.path
 import queue
@@ -31,6 +32,7 @@ import irc.client
 import irc.connection
 from bs4 import BeautifulSoup
 import contexttimer
+import dialogflow_v2beta1 as dialogflow
 
 
 APP_NAME = 'doty'
@@ -80,8 +82,8 @@ def denote_callback(clbk_type):
         return inner_wrapper
     return outer_wrapper
 
-def generate_uuid():
-    return str(uuid.uuid1())
+generate_uuid = lambda: str(uuid.uuid1())
+sha1sum = lambda data: hashlib.sha1(data if type(data) is bytes else data.encode('utf-8')).hexdigest()
 
 def denotify_username(username):
     if len(username) > 1:
@@ -140,20 +142,25 @@ class IrcControlCommand(Enum):
     SEND_CHANNEL_TEXT_MSG = auto()
     SEND_CHANNEL_ACTION = auto()
 
+class DialogflowControlCommand(Enum):
+    EXIT = auto()
+    DETECT_INTENT_TEXT = auto()
+    DETECT_INTENT_TEXT_RESPONSE = auto()
+    DETECT_INTENT_AUDIO = auto()
+    DETECT_INTENT_AUDIO_RESPONSE = auto()
+
 class TranscriberControlCommand(Enum):
     EXIT = auto()
     TRANSCRIBE_MESSAGE = auto()
-    TRANSCRIBE_COMMAND = auto()
+    TRANSCRIBE_MESSAGE_RESPONSE = auto()
 
 class SpeakerControlCommand(Enum):
     EXIT = auto()
     SPEAK_MESSAGE = auto()
+    SPEAK_MESSAGE_RESPONSE = auto()
 
 class RouterControlCommand(Enum):
     EXIT = auto()
-    TRANSCRIBE_MESSAGE_RESPONSE = auto()
-    TRANSCRIBE_COMMAND_RESPONSE = auto()
-    SPEAK_MESSAGE_RESPONSE = auto()
 
 @multiprocessify
 def proc_irc(irc_config, router_conn):
@@ -282,6 +289,103 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
     log.debug('Mumble process exiting')
 
 @multiprocessify
+def proc_dialogflow(dialogflow_config, router_conn):
+    POLL_COUNT = 1
+    log = getWorkerLogger('dialogflow', level=LOG_LEVEL)
+    keep_running = True
+    SESSION_MAP = {}
+    log.debug('DialogFlow starting up')
+
+    df_client = dialogflow.SessionsClient.from_service_account_json(dialogflow_config['google_cloud_auth'])
+    df_input_audio_config = dialogflow.types.QueryInput(
+        audio_config=dialogflow.types.InputAudioConfig(
+            audio_encoding=dialogflow.enums.AudioEncoding.AUDIO_ENCODING_LINEAR_16,
+            language_code=dialogflow_config['language'],
+            sample_rate_hertz=PYMUMBLE_SAMPLERATE,
+        ),
+    )
+    df_output_audio_config = dialogflow.types.OutputAudioConfig(
+        audio_encoding=dialogflow.enums.AudioEncoding.AUDIO_ENCODING_LINEAR_16,
+        sample_rate_hertz=PYMUMBLE_SAMPLERATE,
+        synthesize_speech_config=dialogflow.types.SynthesizeSpeechConfig(
+            effects_profile_id=dialogflow_config['effect_profiles'],
+            voice=dialogflow.types.VoiceSelectionParams(
+                name=dialogflow_config['voice'],
+            ),
+        ),
+    )
+
+    @contexttimer.timer(logger=log, level=logging.DEBUG)
+    def detect_intent_text(session, text):
+        response = df_client.detect_intent(
+            session=session,
+            query_input=dialogflow.types.QueryInput(text=text),
+        )
+        return response
+
+    @contexttimer.timer(logger=log, level=logging.DEBUG)
+    def detect_intent_audio(session, audio_buffer):
+        response = df_client.detect_intent(
+            session=session,
+            query_input=df_input_audio_config,
+            input_audio=audio_buffer,
+            output_audio_config=df_output_audio_config,
+        )
+        return response
+
+    def get_session(actor_id):
+        try:
+            return SESSION_MAP[actor_id]
+        except KeyError:
+            session = df_client.session_path(dialogflow_config['project'], generate_uuid())
+            SESSION_MAP[actor_id] = session
+            return session
+
+    log.info('DialogFlow running')
+    while keep_running:
+        if router_conn.poll(POLL_TIMEOUT / POLL_COUNT):
+            cmd_data = router_conn.recv()
+            if cmd_data['cmd'] == DialogflowControlCommand.EXIT:
+                log.debug('Recieved EXIT command from router')
+                keep_running = False
+            elif cmd_data['cmd'] == DialogflowControlCommand.DETECT_INTENT_AUDIO:
+                result = detect_intent(get_session(cmd_data['actor']), cmd_data['buffer'])
+                if result:
+                    log.debug('DialogFlow audio response: txid=%s intent=%s query_text=%s fulfillment_text=%s',
+                        cmd_data['txid'],
+                        result.query_result.intent.display_name,
+                        result.query_result.query_text,
+                        result.query_result.fulfillment_text,
+                    )
+                    router_conn.send({
+                        'cmd': DialogflowControlCommand.DETECT_INTENT_AUDIO_RESPONSE,
+                        'buffer': result.output_audio,
+                        'msg': result.query_result.fulfillment_text,
+                        'actor': cmd_data['actor'],
+                        'txid': cmd_data['txid'],
+                    })
+                else:
+                    log.debug('No DialogFlow audio result for: txid=%s actor=%d',
+                        cmd_data['txid'], cmd_data['actor'])
+            elif cmd_data['cmd'] == DialogflowControlCommand.DETECT_INTENT_TEXT:
+                result = detect_intent_text(get_session(cmd_data['actor']), cmd_data['msg'])
+                if result:
+                    log.debug('DialogFlow text response: txid=%s intent=%s',
+                        cmd_data['txid'], result.query_result.intent.display_name)
+                    router_conn.send({
+                        'cmd': DialogflowControlCommand.DETECT_INTENT_TEXT_RESPONSE,
+                        'msg': result.query_result.fulfillment_text,
+                        'actor': cmd_data['actor'],
+                        'txid': cmd_data['txid'],
+                    })
+                else:
+                    log.debug('No DialogFlow text result for: txid=%s actor=%d',
+                        cmd_data['txid'], cmd_data['actor'])
+            else:
+                log.warning('Unrecognized command: %r', cmd_data)
+    log.debug('DialogFlow process exiting')
+
+@multiprocessify
 def proc_transcriber(transcription_config, router_conn):
     POLL_COUNT = 1
     log = getWorkerLogger('transcriber', level=LOG_LEVEL)
@@ -319,18 +423,17 @@ def proc_transcriber(transcription_config, router_conn):
             elif cmd_data['cmd'] == TranscriberControlCommand.TRANSCRIBE_MESSAGE:
                 result = transcribe(cmd_data['buffer'], cmd_data['phrases'])
                 if result:
-                    log.debug('Transcription result: txid=%s session=%d result=%r',
+                    log.debug('Transcription result: txid=%s actor=%d result=%r',
                         cmd_data['txid'], cmd_data['actor'], result)
                     router_conn.send({
-                        'cmd': RouterControlCommand.TRANSCRIBE_MESSAGE_RESPONSE,
+                        'cmd': TranscriberControlCommand.TRANSCRIBE_MESSAGE_RESPONSE,
                         'actor': cmd_data['actor'],
                         'result': result,
                         'txid': cmd_data['txid'],
                     })
                 else:
-                    log.debug('No transcription result for: txid=%s, session=%d', cmd_data['txid'], cmd_data['actor'])
-            elif cmd_data['cmd'] == TranscriberControlCommand.TRANSCRIBE_COMMAND:
-                pass
+                    log.debug('No transcription result for: txid=%s, actor=%d',
+                        cmd_data['txid'], cmd_data['actor'])
             else:
                 log.warning('Unrecognized command: %r', cmd_data)
     log.debug('Transcriber process exiting')
@@ -378,7 +481,7 @@ def proc_speaker(speaker_config, router_conn):
                     log.debug('Speaker result: txid=%s session=%d buffer[]=%d',
                         cmd_data['txid'], cmd_data['actor'], len(audio))
                     router_conn.send({
-                        'cmd': RouterControlCommand.SPEAK_MESSAGE_RESPONSE,
+                        'cmd': SpeakerControlCommand.SPEAK_MESSAGE_RESPONSE,
                         'buffer': audio,
                         'msg': cmd_data['msg'],
                         'actor': cmd_data['actor'],
@@ -389,8 +492,8 @@ def proc_speaker(speaker_config, router_conn):
     log.debug('Speaker process exiting')
 
 @multiprocessify
-def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, master_conn):
-    POLL_COUNT = 4
+def proc_router(router_config, mmbl_conn, irc_conn, df_conn, trans_conn, speak_conn, master_conn):
+    POLL_COUNT = 5
     log = getWorkerLogger('router', level=LOG_LEVEL)
     keep_running = True
     log.debug('Router starting up')
@@ -401,6 +504,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
 
     mmbl_conn._swap()
     irc_conn._swap()
+    df_conn._swap()
     trans_conn._swap()
     speak_conn._swap()
 
@@ -494,9 +598,30 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
             else:
                 log.warning('Unrecognized mumble event type: %s => %r', event_type, event_args)
 
+        if df_conn.poll(POLL_TIMEOUT / POLL_COUNT):
+            cmd_data = df_conn.recv()
+            if cmd_data['cmd'] == DialogflowControlCommand.DETECT_INTENT_AUDIO_RESPONSE:
+                log.debug('Got DialogFlow audio response: txid=%s actor=%d len=%d bytes',
+                    cmd_data['txid'], cmd_data['actor'], len(cmd_data['buffer']))
+                cmd_data['cmd'] = MumbleControlCommand.SEND_AUDIO_MSG
+                mmbl_conn.send(cmd_data)
+                irc_conn.send({
+                    'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
+                    'msg': cmd_data['msg'],
+                })
+            elif cmd_data['cmd'] == DialogflowControlCommand.DETECT_INTENT_TEXT_RESPONSE:
+                cmd_data['cmd'] = MumbleControlCommand.SEND_CHANNEL_TEXT_MSG
+                mmbl_conn.send(cmd_data)
+                irc_conn.send({
+                    'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
+                    'msg': cmd_data['msg'],
+                })
+            else:
+                log.warning('Unrecognized command from dialogflow: %r', cmd_data)
+
         if trans_conn.poll(POLL_TIMEOUT / POLL_COUNT):
             cmd_data = trans_conn.recv()
-            if cmd_data['cmd'] == RouterControlCommand.TRANSCRIBE_MESSAGE_RESPONSE:
+            if cmd_data['cmd'] == TranscriberControlCommand.TRANSCRIBE_MESSAGE_RESPONSE:
                 log.debug('Recieved transcription result for: txid=%s', cmd_data['txid'])
                 try:
                     sender = MMBL_USERS[cmd_data['actor']]
@@ -513,15 +638,12 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                 cmd_msg = cmd_data['result']['transcript'].strip()
                 if cmd_msg.lower().startswith(router_config['activation_word'].lower()):
                     log.debug('Found possible voice command: %s', cmd_msg)
-
-            elif cmd_data['cmd'] == RouterControlCommand.TRANSCRIBE_COMMAND_RESPONSE:
-                pass
             else:
                 log.warning('Unrecognized command from transcriber: %r', cmd_data)
 
         if speak_conn.poll(POLL_TIMEOUT / POLL_COUNT):
             cmd_data = speak_conn.recv()
-            if cmd_data['cmd'] == RouterControlCommand.SPEAK_MESSAGE_RESPONSE:
+            if cmd_data['cmd'] == SpeakerControlCommand.SPEAK_MESSAGE_RESPONSE:
                 log.debug('Got speaker response: txid=%s actor=%d len=%d b',
                     cmd_data['txid'], cmd_data['actor'], len(cmd_data['buffer']))
                 cmd_data['cmd'] = MumbleControlCommand.SEND_AUDIO_MSG
@@ -598,6 +720,7 @@ def main(args, **kwargs):
 
     mmbl_conn = QueuePipe()
     irc_conn = QueuePipe()
+    df_conn = QueuePipe()
     trans_conn = QueuePipe()
     speak_conn = QueuePipe()
     router_conn = QueuePipe()
@@ -609,6 +732,9 @@ def main(args, **kwargs):
     if not args.no_irc:
         running_procs.append(
             proc_irc(config['irc'], irc_conn))
+    if not args.no_dialogflow:
+        running_procs.append(
+            proc_dialogflow(config['dialogflow'], df_conn))
     if not args.no_transcriber:
         running_procs.append(
             proc_transcriber(config['transcriber'], trans_conn))
@@ -616,7 +742,7 @@ def main(args, **kwargs):
         running_procs.append(
             proc_speaker(config['speaker'], speak_conn))
     running_procs.append(
-        proc_router(config['router'], mmbl_conn, irc_conn, trans_conn,
+        proc_router(config['router'], mmbl_conn, irc_conn, df_conn, trans_conn,
             speak_conn, router_conn))
 
     log.debug('Entering sleep loop')
@@ -653,7 +779,7 @@ if __name__ == '__main__':
         help='Log fewer messages',
         action='count', default=0,
     )
-    for proc_type in ['mumble', 'irc', 'transcriber', 'speaker']:
+    for proc_type in ['mumble', 'irc', 'dialogflow', 'transcriber', 'speaker']:
         parser.add_argument('--no-{}'.format(proc_type),
             help='Do not start the {} process'.format(proc_type),
             action='store_true', default=False,
