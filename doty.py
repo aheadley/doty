@@ -175,7 +175,7 @@ def proc_irc(irc_config, router_conn):
         conn_factory = irc.connection.Factory()
 
     def handle_irc_message(conn, event):
-        log.debug('Recieved IRC event: %r', event)
+        log.debug('Recieved IRC event: %s', event)
 
     client.add_global_handler('pubmsg', handle_irc_message)
     client.add_global_handler('privmsg', handle_irc_message)
@@ -238,7 +238,7 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
         with clbk_lock:
             router_conn.send((clbk_type, args))
 
-    for callback_type in (v for k, v in globals().items() if k.startswith('PYMUMBLE_CLBK_')):
+    for callback_type in mmbl.callbacks.get_callbacks_list():
         clbk = denote_callback(callback_type)(handle_callback)
         mmbl.callbacks.add_callback(callback_type, clbk)
 
@@ -412,15 +412,10 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
             'txid': generate_uuid(),
             })
 
-    if router_config['startup_message']:
-        say(router_config['startup_message'])
-
     log.info('Router running')
     while keep_running:
         if mmbl_conn.poll(POLL_TIMEOUT / POLL_COUNT):
-            with contexttimer.Timer() as t:
-                (event_type, event_args) = mmbl_conn.recv()
-            # log.debug('mmbl_conn.recv took: %fs', t.elapsed)
+            (event_type, event_args) = mmbl_conn.recv()
             if event_type != PYMUMBLE_CLBK_SOUNDRECEIVED:
                 # sound events are way too noisy
                 log.debug('Recieved event from mumble: %s => %r', event_type, event_args)
@@ -449,6 +444,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                             )})
             elif event_type == PYMUMBLE_CLBK_USERREMOVED:
                 (user_data, session_data) = event_args
+                AUDIO_BUFFERS[user_data['session']]['buffer'].clear()
                 del MMBL_USERS[user_data['session']]
                 del AUDIO_BUFFERS[user_data['session']]
                 irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_ACTION,
@@ -483,7 +479,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                     # !say command
                     if msg_data['message'].startswith('!say'):
                         say_msg = msg_data['message'].split(' ', 1)[1].strip()
-                        say(say_msg, source_id=sender['session'])
+                        say(say_msg, source_id=msg_data['actor'])
             elif event_type == PYMUMBLE_CLBK_SOUNDRECEIVED:
                 (sender, sound_chunk) = event_args
                 sender_data = AUDIO_BUFFERS[sender['session']]
@@ -492,6 +488,9 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                         log.debug('Started recieving audio for: %s', sender['name'])
                     sender_data['buffer'].append(sound_chunk)
                     sender_data['last_sample'] = time.time()
+            elif event_type == PYMUMBLE_CLBK_CONNECTED:
+                if router_config['startup_message']:
+                    say(router_config['startup_message'])
             else:
                 log.warning('Unrecognized mumble event type: %s => %r', event_type, event_args)
 
@@ -552,7 +551,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                 buf_dur = sum(c.duration for c in data['buffer'])
                 if len(data['buffer']) == data['buffer'].maxlen:
                     log.debug('Buffer is full, flushing: %s dur=%1.2fs',
-                        user['name'], MAX_TRANSCRIPTION_TIME)
+                        user['name'], buf_dur)
                     txid = generate_uuid()
                     audio_buffer = b''.join(c.pcm for c in sorted(data['buffer'], key=lambda c: c.sequence))
                     log.debug('Queueing partial buffer: txid=%s len=%d bytes dur=%1.2fs', txid, len(audio_buffer), buf_dur)
