@@ -295,7 +295,7 @@ def proc_transcriber(transcription_config, router_conn):
         speech_content = gcloud_speech.types.RecognitionAudio(content=buf)
         speech_config = gcloud_speech.types.RecognitionConfig(
             encoding=gcloud_speech.enums.RecognitionConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=48000,
+            sample_rate_hertz=PYMUMBLE_SAMPLERATE,
             language_code=transcription_config['language'],
             speech_contexts=[gcloud_speech.types.SpeechContext(phrases=phrases \
                 + transcription_config['hint_phrases'])],
