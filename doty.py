@@ -96,6 +96,9 @@ class QueuePipe:
 
         self._buffer = []
 
+        self._in.cancel_join_thread()
+        self._out.cancel_join_thread()
+
     def __setstate__(self, state):
         super().__setstate__(state)
         self._swap()
@@ -171,9 +174,8 @@ def proc_irc(irc_config, router_conn):
     else:
         conn_factory = irc.connection.Factory()
 
-    # @contexttimer.timer(logger=log)
     def handle_irc_message(conn, event):
-        log.debug('Recieved IRC event: %s', event)
+        log.debug('Recieved IRC event: %r', event)
 
     client.add_global_handler('pubmsg', handle_irc_message)
     client.add_global_handler('privmsg', handle_irc_message)
@@ -198,8 +200,10 @@ def proc_irc(irc_config, router_conn):
                 server.disconnect()
                 keep_running = False
             elif cmd_data['cmd'] == IrcControlCommand.SEND_CHANNEL_TEXT_MSG:
+                log.info('Sending message: %s', cmd_data['msg'])
                 server.privmsg(irc_config['channel'], cmd_data['msg'])
             elif cmd_data['cmd'] == IrcControlCommand.SEND_CHANNEL_ACTION:
+                log.info('Sending action: %s', cmd_data['msg'])
                 server.action(irc_config['channel'], cmd_data['msg'])
             else:
                 log.warning('Unrecognized command: %r', cmd_data)
@@ -222,7 +226,6 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
     mmbl.set_receive_sound(True)
 
     log.debug('Setting up callbacks')
-    # @contexttimer.timer(logger=log)
     def handle_callback(clbk_type, *args):
         args = normalize_callback_args(clbk_type, args)
         if clbk_type == PYMUMBLE_CLBK_SOUNDRECEIVED:
@@ -252,11 +255,11 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
                 log.debug('Recieved exit command from router')
                 keep_running = False
             elif cmd_data['cmd'] == MumbleControlCommand.SEND_CHANNEL_TEXT_MSG:
-                log.debug('Sending text message to channel: %s => %s',
+                log.info('Sending text message to channel: %s => %s',
                     mmbl.channels[cmd_data['channel_id']]['name'], cmd_data['msg'])
                 mmbl.channels[cmd_data['channel_id']].send_text_message(cmd_data['msg'])
             elif cmd_data['cmd'] == MumbleControlCommand.SEND_USER_TEXT_MSG:
-                log.debug('Sending text message to user: %s => %s',
+                log.info('Sending text message to user: %s => %s',
                     mmbl.users[cmd_data['session_id']]['name'], cmd_data['msg'])
                 mmbl.users[cmd_data['session_id']].send_message(cmd_data['msg'])
             elif cmd_data['cmd'] == MumbleControlCommand.MOVE_TO_CHANNEL:
@@ -269,7 +272,7 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
                 else:
                     mmbl.users.myself.move_in(target_channel['channel_id'])
             elif cmd_data['cmd'] == MumbleControlCommand.SEND_AUDIO_MSG:
-                log.debug('Sending audio message: %d bytes', len(cmd_data['buffer']))
+                log.info('Sending audio message: %d bytes', len(cmd_data['buffer']))
                 mmbl.sound_output.add_sound(cmd_data['buffer'])
             else:
                 log.warning('Unrecognized command: %r', cmd_data)
@@ -287,7 +290,7 @@ def proc_transcriber(transcription_config, router_conn):
 
     speech_client = gcloud_speech.SpeechClient.from_service_account_json(transcription_config['google_cloud_auth'])
 
-    @contexttimer.timer(logger=log)
+    @contexttimer.timer(logger=log, level=logging.DEBUG)
     def transcribe(buf, phrases=[]):
         speech_content = gcloud_speech.types.RecognitionAudio(content=buf)
         speech_config = gcloud_speech.types.RecognitionConfig(
@@ -316,7 +319,7 @@ def proc_transcriber(transcription_config, router_conn):
             elif cmd_data['cmd'] == TranscriberControlCommand.TRANSCRIBE_MESSAGE:
                 result = transcribe(cmd_data['buffer'], cmd_data['phrases'])
                 if result:
-                    log.info('Transcription result: txid=%s session=%d result=%r',
+                    log.debug('Transcription result: txid=%s session=%d result=%r',
                         cmd_data['txid'], cmd_data['actor'], result)
                     router_conn.send({
                         'cmd': RouterControlCommand.TRANSCRIBE_MESSAGE_RESPONSE,
@@ -351,7 +354,7 @@ def proc_speaker(speaker_config, router_conn):
         effects_profile_id=speaker_config['effect_profiles'],
     )
 
-    @contexttimer.timer(logger=log)
+    @contexttimer.timer(logger=log, level=logging.DEBUG)
     def speak(text):
         text_input = gcloud_texttospeech.types.SynthesisInput(text=text)
         response = tts_client.synthesize_speech(text_input, tts_voice, tts_config)
@@ -372,7 +375,7 @@ def proc_speaker(speaker_config, router_conn):
                 except Exception as err:
                     log.exception(err)
                 else:
-                    log.info('Speaker result: txid=%s session=%d buffer[]=%d',
+                    log.debug('Speaker result: txid=%s session=%d buffer[]=%d',
                         cmd_data['txid'], cmd_data['actor'], len(audio))
                     router_conn.send({
                         'cmd': RouterControlCommand.SPEAK_MESSAGE_RESPONSE,
@@ -601,37 +604,21 @@ def main(args, **kwargs):
     router_conn = QueuePipe()
 
     running_procs = []
-
-    try:
-        if not args.no_mumble:
-            mmbl = proc_mmbl(config['mumble'], mmbl_conn, pymumble_debug=kwargs['pymumble_debug'])
-            mmbl.run()
-            running_procs.append(mmbl)
-    except AttributeError: pass
-    try:
-        if not args.no_irc:
-            irc_proc = proc_irc(config['irc'], irc_conn)
-            irc_proc.run()
-            running_procs.append(irc_proc)
-    except AttributeError: pass
-    try:
-        if not args.no_transcriber:
-            transcriber = proc_transcriber(config['transcriber'], trans_conn)
-            transcriber.run()
-            running_procs.append(transcriber)
-    except AttributeError: pass
-    try:
-        if not args.no_speaker:
-            speaker = proc_speaker(config['speaker'], speak_conn)
-            speaker.run()
-            running_procs.append(speaker)
-    except AttributeError: pass
-    try:
-        router = proc_router(config['router'], mmbl_conn, irc_conn, trans_conn,
-            speak_conn, router_conn)
-        router.run()
-        running_procs.append(router)
-    except AttributeError: pass
+    if not args.no_mumble:
+        running_procs.append(
+            proc_mmbl(config['mumble'], mmbl_conn, pymumble_debug=kwargs['pymumble_debug']))
+    if not args.no_irc:
+        running_procs.append(
+            proc_irc(config['irc'], irc_conn))
+    if not args.no_transcriber:
+        running_procs.append(
+            proc_transcriber(config['transcriber'], trans_conn))
+    if not args.no_speaker:
+        running_procs.append(
+            proc_speaker(config['speaker'], speak_conn))
+    running_procs.append(
+        proc_router(config['router'], mmbl_conn, irc_conn, trans_conn,
+            speak_conn, router_conn))
 
     log.debug('Entering sleep loop')
     while not stop_running.is_set():
@@ -641,8 +628,13 @@ def main(args, **kwargs):
     router_conn.send({'cmd': RouterControlCommand.EXIT})
 
     for p in running_procs:
-        p.join(POLL_TIMEOUT * 2)
-        p.terminate()
+        p.join(POLL_TIMEOUT * 10)
+        if p.exitcode is None:
+            try:
+                # only available in 3.7+
+                p.kill()
+            except AttributeError:
+                p.terminate()
 
     log.info('Shutdown complete')
 
