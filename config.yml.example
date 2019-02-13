@@ -31,6 +31,8 @@ router:
 
 dialogflow:
   google_cloud_auth: 'path/to/creds.json'
+  # unsure what this should actually be, it's used to generate a session path
+  project: example-project
   # https://cloud.google.com/speech-to-text/docs/languages
   language: en-US
   # https://cloud.google.com/text-to-speech/docs/voices

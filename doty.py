@@ -7,6 +7,7 @@ import multiprocessing
 import threading
 import functools
 import hashlib
+import html
 import os
 import os.path
 import queue
@@ -141,6 +142,7 @@ class IrcControlCommand(Enum):
     EXIT = auto()
     SEND_CHANNEL_TEXT_MSG = auto()
     SEND_CHANNEL_ACTION = auto()
+    RECV_CHANNEL_TEXT_MSG = auto()
 
 class DialogflowControlCommand(Enum):
     EXIT = auto()
@@ -181,14 +183,17 @@ def proc_irc(irc_config, router_conn):
     else:
         conn_factory = irc.connection.Factory()
 
+    e2d = lambda ev: {'type': ev.type, 'source': ev.source, 'target': ev.target, 'arguments': ev.arguments, 'tags': ev.tags}
     def handle_irc_message(conn, event):
         log.debug('Recieved IRC event: %s', event)
+        if event.type == 'pubmsg':
+            cmd_data = e2d(event)
+            cmd_data['cmd'] = IrcControlCommand.RECV_CHANNEL_TEXT_MSG
+            router_conn.send(cmd_data)
 
     client.add_global_handler('pubmsg', handle_irc_message)
     client.add_global_handler('privmsg', handle_irc_message)
-    client.add_global_handler('pubnotice', handle_irc_message)
-    client.add_global_handler('privnotice', handle_irc_message)
-    client.add_global_handler('action', handle_irc_message)
+    # client.add_global_handler('action', handle_irc_message)
 
     log.info('IRC client running')
     while keep_running:
@@ -262,13 +267,15 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
                 log.debug('Recieved exit command from router')
                 keep_running = False
             elif cmd_data['cmd'] == MumbleControlCommand.SEND_CHANNEL_TEXT_MSG:
+                if 'channel_id' not in cmd_data:
+                    cmd_data['channel_id'] = mmbl.users.myself['channel_id']
                 log.info('Sending text message to channel: %s => %s',
                     mmbl.channels[cmd_data['channel_id']]['name'], cmd_data['msg'])
-                mmbl.channels[cmd_data['channel_id']].send_text_message(cmd_data['msg'])
+                mmbl.channels[cmd_data['channel_id']].send_text_message(html.escape(cmd_data['msg']))
             elif cmd_data['cmd'] == MumbleControlCommand.SEND_USER_TEXT_MSG:
                 log.info('Sending text message to user: %s => %s',
                     mmbl.users[cmd_data['session_id']]['name'], cmd_data['msg'])
-                mmbl.users[cmd_data['session_id']].send_message(cmd_data['msg'])
+                mmbl.users[cmd_data['session_id']].send_message(html.escape(cmd_data['msg']))
             elif cmd_data['cmd'] == MumbleControlCommand.MOVE_TO_CHANNEL:
                 log.info('Joining channel: %s', cmd_data['channel_name'])
                 try:
@@ -474,7 +481,7 @@ def proc_speaker(speaker_config, router_conn):
                 log.debug('Recieved speaker request: txid=%s session=%d msg=%s',
                     cmd_data['txid'], cmd_data['actor'], cmd_data['msg'])
                 try:
-                    audio = speak(cmd_data['msg'])
+                    audio = speak(cmd_data['msg'].replace(ZW_SPACE, ''))
                 except Exception as err:
                     log.exception(err)
                 else:
@@ -493,7 +500,7 @@ def proc_speaker(speaker_config, router_conn):
 
 @multiprocessify
 def proc_router(router_config, mmbl_conn, irc_conn, df_conn, trans_conn, speak_conn, master_conn):
-    POLL_COUNT = 5
+    POLL_COUNT = 6
     log = getWorkerLogger('router', level=LOG_LEVEL)
     keep_running = True
     log.debug('Router starting up')
@@ -518,6 +525,33 @@ def proc_router(router_config, mmbl_conn, irc_conn, df_conn, trans_conn, speak_c
 
     log.info('Router running')
     while keep_running:
+        if irc_conn.poll(POLL_TIMEOUT / POLL_COUNT):
+            cmd_data = irc_conn.recv()
+            if cmd_data['cmd'] == IrcControlCommand.RECV_CHANNEL_TEXT_MSG:
+                clean_nick = cmd_data['source'].split('!')[0]
+                if clean_nick not in router_config['ignore']:
+                    for msg in cmd_data['arguments']:
+                        if msg.startswith('!moveto'):
+                            target_name = msg.split(' ', 1)[1].strip()
+                            mmbl_conn.send({
+                                'cmd': MumbleControlCommand.MOVE_TO_CHANNEL,
+                                'channel_name': target_name,
+                            })
+                        # !say command
+                        elif msg.startswith('!say'):
+                            say_msg = '{} said: {}'.format(
+                                denotify_username(clean_nick),
+                                msg.split(' ', 1)[1].strip(),
+                            )
+                            say(say_msg)
+                        else:
+                            mmbl_conn.send({
+                                'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
+                                'msg': '<{}> {}'.format(clean_nick, msg),
+                            })
+            else:
+                log.warning('Recieved unknown command from IRC: %r', cmd_data)
+
         if mmbl_conn.poll(POLL_TIMEOUT / POLL_COUNT):
             (event_type, event_args) = mmbl_conn.recv()
             if event_type != PYMUMBLE_CLBK_SOUNDRECEIVED:
