@@ -29,6 +29,16 @@ router:
   # https://www.youtube.com/watch?v=QrWAdq8e_uA
   startup_message: Reactor Online. Sensors Online. Weapons Online. All Systems Nominal.
 
+dialogflow:
+  google_cloud_auth: 'path/to/creds.json'
+  # https://cloud.google.com/speech-to-text/docs/languages
+  language: en-US
+  # https://cloud.google.com/text-to-speech/docs/voices
+  voice: en-US-Wavenet-E
+  # https://cloud.google.com/text-to-speech/docs/audio-profiles
+  effect_profiles:
+    - handset-class-device
+
 transcriber:
   google_cloud_auth: 'path/to/creds.json'
   # https://cloud.google.com/speech-to-text/docs/languages
