@@ -44,6 +44,7 @@ ZW_SPACE = u'\u200B'
 WAV_HEADER_LEN = 44
 # https://cloud.google.com/speech-to-text/quotas
 MAX_TRANSCRIPTION_TIME = 60.0
+BASE_CONFIG_FILENAME = 'config.yml.example'
 
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 logging.basicConfig(level=LOG_LEVEL)
@@ -60,6 +61,18 @@ def getWorkerLogger(worker_name, level=logging.DEBUG):
     log = logging.getLogger('{}.{}-{:05d}'.format(APP_NAME, worker_name, os.getpid()))
     log.setLevel(level)
     return log
+
+def deep_merge_dict(a, b):
+    for k, v in b.items():
+        if isinstance(b[k], dict):
+            if k in a:
+                if not isinstance(a[k], dict):
+                    raise ValueError('Non-matching types for key: {}'.format(k))
+                else:
+                    a[k] = deep_merge_dict(a[k], b[k])
+                    continue
+        a[k] = b[k]
+    return a
 
 log = getWorkerLogger('main')
 
@@ -233,7 +246,7 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
         mmbl_config['username'], password=mmbl_config['password'],
         port=mmbl_config['port'],
         debug=pymumble_debug,
-        reconnect=True,
+        reconnect=False,
     )
     mmbl.set_receive_sound(True)
 
@@ -749,8 +762,13 @@ def main(args, **kwargs):
         log.error('-c/--config is required')
         raise SystemExit()
 
-    with open(args.config) as config_handle:
+    cfg_fn = os.path.join(os.path.dirname(__file__), BASE_CONFIG_FILENAME)
+    log.debug('Loading base config: %s', cfg_fn)
+    with open(cfg_fn) as config_handle:
         config = yaml.safe_load(config_handle)
+    log.debug('Loading user config: %s', args.config)
+    with open(args.config) as config_handle:
+        config = deep_merge_dict(config, yaml.safe_load(config_handle))
 
     mmbl_conn = QueuePipe()
     irc_conn = QueuePipe()
@@ -759,34 +777,71 @@ def main(args, **kwargs):
     speak_conn = QueuePipe()
     router_conn = QueuePipe()
 
-    running_procs = []
+    running_procs = {}
     if not args.no_mumble:
-        running_procs.append(
-            proc_mmbl(config['mumble'], mmbl_conn, pymumble_debug=kwargs['pymumble_debug']))
+        running_procs['mumble'] = proc_mmbl(
+            config['mumble'], mmbl_conn, pymumble_debug=kwargs['pymumble_debug'])
     if not args.no_irc:
-        running_procs.append(
-            proc_irc(config['irc'], irc_conn))
+        running_procs['irc'] = proc_irc(config['irc'], irc_conn)
     if not args.no_dialogflow:
-        running_procs.append(
-            proc_dialogflow(config['dialogflow'], df_conn))
+        running_procs['dialogflow'] = proc_dialogflow(config['dialogflow'], df_conn)
     if not args.no_transcriber:
-        running_procs.append(
-            proc_transcriber(config['transcriber'], trans_conn))
+        running_procs['transcriber'] = proc_transcriber(config['transcriber'], trans_conn)
     if not args.no_speaker:
-        running_procs.append(
-            proc_speaker(config['speaker'], speak_conn))
-    running_procs.append(
-        proc_router(config['router'], mmbl_conn, irc_conn, df_conn, trans_conn,
-            speak_conn, router_conn))
+        running_procs['speaker'] = proc_speaker(config['speaker'], speak_conn)
+    running_procs['router'] = proc_router(config['router'],
+        mmbl_conn, irc_conn, df_conn, trans_conn, speak_conn, router_conn)
+    proc_start_times = {k: time.time() for k in running_procs.keys()}
+    last_restart = time.time()
+    restart_wait = config['main']['restart_wait']
 
     log.debug('Entering sleep loop')
     while not stop_running.is_set():
-        time.sleep(POLL_TIMEOUT)
-    log.debug('Caught ^C, shutting down')
-
+        time.sleep(POLL_TIMEOUT * 10)
+        if (time.time() - last_restart) > (restart_wait * restart_wait):
+            if restart_wait != config['main']['restart_wait']:
+                restart_wait = config['main']['restart_wait']
+                log.debug('Reset restart wait to: %1.1fs', restart_wait)
+        for proc_name, proc in running_procs.items():
+            if proc.exitcode is not None:
+                if proc_start_times[proc_name] is not None:
+                    log.warning('Detected process exit: %s exitcode=%s runtime=%1.2fs',
+                        proc_name, proc.exitcode, (time.time() - proc_start_times[proc_name]))
+                    proc_start_times[proc_name] = None
+                if not args.no_autorestart:                
+                    if (time.time() - last_restart) > restart_wait:
+                        log.info('Restarting proc: %s', proc_name)
+                        if proc_name == 'mumble':
+                            running_procs[proc_name] = proc_mmbl(
+                                config[proc_name], mmbl_conn, pymumble_debug=kwargs['pymumble_debug'])
+                        elif proc_name == 'irc':
+                            running_procs[proc_name] = proc_irc(config[proc_name], irc_conn)
+                        elif proc_name == 'dialogflow':
+                            running_procs[proc_name] = proc_dialogflow(config[proc_name], df_conn)
+                        elif proc_name == 'transcriber':
+                            running_procs[proc_name] = proc_transcriber(config[proc_name], trans_conn)
+                        elif proc_name == 'speaker':
+                            running_procs[proc_name] = proc_speaker(config[proc_name], speak_conn)
+                        elif proc_name == 'router':
+                            log.error('Not attempting to restart router, will now exit')
+                            stop_running.set()
+                        else:
+                            log.warning('Ignoring unknown proc name: %s', proc_name)
+                            continue
+                        last_restart = time.time()
+                        proc_start_times[proc_name] = last_restart
+                        restart_wait = min(
+                            restart_wait * config['main']['restart_factor'],
+                            config['main']['restart_max'])
+                        log.debug('Increased restart wait to: %1.1fs', restart_wait)
+                else:
+                    log.debug('Running without autorestart, bailing out')
+                    stop_running.set()
+                    break
+    log.debug('Exited sleep loop')
     router_conn.send({'cmd': RouterControlCommand.EXIT})
 
-    for p in running_procs:
+    for p in running_procs.values():
         p.join(POLL_TIMEOUT * 10)
         if p.exitcode is None:
             try:
@@ -814,10 +869,14 @@ if __name__ == '__main__':
         action='count', default=0,
     )
     for proc_type in ['mumble', 'irc', 'dialogflow', 'transcriber', 'speaker']:
-        parser.add_argument('--no-{}'.format(proc_type),
+        parser.add_argument('-{}'.format(proc_type[0].upper()), '--no-{}'.format(proc_type),
             help='Do not start the {} process'.format(proc_type),
             action='store_true', default=False,
         )
+    parser.add_argument('-A', '--no-autorestart',
+        help='Don\'t automatically restart crashed processes',
+        action='store_true', default=False,
+    )
     args = parser.parse_args()
 
     LOG_LEVEL = min(logging.CRITICAL, max(logging.DEBUG,

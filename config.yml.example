@@ -1,5 +1,13 @@
 ---
 
+main:
+  # initial time to wait to restart a crashed process
+  restart_wait: 3
+  # restart time is multiplied by this every time a restart is triggered
+  restart_factor: 1.5
+  # max restart wait time
+  restart_max: 300
+
 mumble:
   server: localhost
   port: 64738
