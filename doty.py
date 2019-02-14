@@ -45,6 +45,7 @@ WAV_HEADER_LEN = 44
 # https://cloud.google.com/speech-to-text/quotas
 MAX_TRANSCRIPTION_TIME = 60.0
 BASE_CONFIG_FILENAME = 'config.yml.example'
+SOUNDCHUNK_SIZE = 1920
 
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 logging.basicConfig(level=LOG_LEVEL)
@@ -536,6 +537,9 @@ def proc_router(router_config, mmbl_conn, irc_conn, df_conn, trans_conn, speak_c
             'txid': generate_uuid(),
             })
 
+    if router_config['startup_message']:
+        say(router_config['startup_message'])
+
     log.info('Router running')
     while keep_running:
         if irc_conn.poll(POLL_TIMEOUT / POLL_COUNT):
@@ -637,11 +641,29 @@ def proc_router(router_config, mmbl_conn, irc_conn, df_conn, trans_conn, speak_c
                 if sender['name'] not in router_config['ignore']:
                     if sender_data['last_sample'] is None and len(sender_data['buffer']) == 0:
                         log.debug('Started recieving audio for: %s', sender['name'])
+                    elif sender_data['last_sample'] is not None and len(sender_data['buffer']) > 0:
+                        last_chunk = sender_data['buffer'][-1]
+                        # dt = min(time.time() - sender_data['last_sample'], router_config['wait_time'])
+                        dt = min(sound_chunk.time - last_chunk.time, router_config['wait_time'])
+                        if dt > (POLL_TIMEOUT * max(2, len(MMBL_USERS))):
+                            missing_packets = int(dt // PYMUMBLE_AUDIO_PER_PACKET)
+                            if missing_packets > 0:
+                                log.debug('Inserting silence: pkt_count=%d dt=%1.3fs len=%1.3s',
+                                    missing_packets, dt, missing_packets * PYMUMBLE_AUDIO_PER_PACKET)
+                                for i in range(missing_packets):
+                                    sender_data['buffer'].append(pymumble.soundqueue.SoundChunk(
+                                        bytes(SOUNDCHUNK_SIZE),
+                                        last_chunk.sequence + (i * POLL_TIMEOUT),
+                                        SOUNDCHUNK_SIZE,
+                                        last_chunk.time + ((PYMUMBLE_AUDIO_PER_PACKET/missing_packets) * i),
+                                        last_chunk.type,
+                                        last_chunk.target,
+                                        timestamp=last_chunk.timestamp + ((PYMUMBLE_AUDIO_PER_PACKET/missing_packets) * i),
+                                    ))
                     sender_data['buffer'].append(sound_chunk)
                     sender_data['last_sample'] = time.time()
             elif event_type == PYMUMBLE_CLBK_CONNECTED:
-                if router_config['startup_message']:
-                    say(router_config['startup_message'])
+                pass
             else:
                 log.warning('Unrecognized mumble event type: %s => %r', event_type, event_args)
 
@@ -739,7 +761,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, df_conn, trans_conn, speak_c
                         log.debug('Buffer is too short to transcribe: %1.2fs', buf_dur)
                     else:
                         txid = generate_uuid()
-                        audio_buffer = b''.join(c.pcm for c in sorted(data['buffer'], key=lambda c: c.sequence))
+                        audio_buffer = b''.join(c.pcm for c in sorted(data['buffer'], key=lambda c: c.time))
                         log.debug('Queueing buffer: txid=%s len=%d bytes dur=%1.2fs', txid, len(audio_buffer), buf_dur)
                         trans_conn.send({'cmd': TranscriberControlCommand.TRANSCRIBE_MESSAGE,
                             'actor': user['session'],
@@ -747,7 +769,14 @@ def proc_router(router_config, mmbl_conn, irc_conn, df_conn, trans_conn, speak_c
                             'phrases': [u['name'] for u in MMBL_USERS.values()] + [router_config['activation_word']],
                             'txid': txid,
                         })
-                    data['buffer'].clear()
+                        data['buffer'].clear()
+                        # mmbl_conn.send({
+                        #     'cmd': MumbleControlCommand.SEND_AUDIO_MSG,
+                        #     'actor': session_id,
+                        #     'txid': generate_uuid(),
+                        #     'buffer': audio_buffer,
+                        #     'msg': 'dummy text',
+                        # })
                     data['last_sample'] = None
     log.debug('Router process exiting')
 
