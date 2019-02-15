@@ -578,7 +578,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                             #   length at that
                             dt = router_config['wait_time']
                         else:
-                            dt = min(sound_chunk.time - last_chunk.time, dt)
+                            dt = min(sound_chunk.time - last_chunk.time, router_config['wait_time'])
 
                         # check if we need to insert silence
                         if dt > (PYMUMBLE_AUDIO_PER_PACKET * 2):
