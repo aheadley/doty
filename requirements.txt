@@ -7,4 +7,3 @@ opuslib==2.0.0
 protobuf==3.6.1
 PyYAML==3.13
 google-cloud-texttospeech==0.4.0
-dialogflow==0.5.2
