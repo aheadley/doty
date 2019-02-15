@@ -393,6 +393,9 @@ def proc_speaker(speaker_config, router_conn):
         audio_encoding=gcloud_texttospeech.enums.AudioEncoding.LINEAR16,
         sample_rate_hertz=PYMUMBLE_SAMPLERATE,
         effects_profile_id=speaker_config['effect_profiles'],
+        speaking_rate=speaker_config['speed'],
+        pitch=speaker_config['pitch'],
+        volume_gain_db=speaker_config['volume'],
     )
 
     @contexttimer.timer(logger=log, level=logging.DEBUG)
