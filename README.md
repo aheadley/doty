@@ -1,5 +1,5 @@
 # doty
-Doty, take this down...
+>[Doty, take this down...](https://www.youtube.com/watch?v=JiG_tOoqfIM)
 
 Doty is (primarily) a Mumble <> IRC bridge/transcription bot. It will transcribe any speech
 in a Mumble channel and output it to IRC, while copying or speaking any IRC
