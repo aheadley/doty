@@ -690,6 +690,8 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
         if irc_conn in ready:
             cmd_data = irc_conn.recv()
             if cmd_data['cmd'] in (IrcControlCommand.RECV_CHANNEL_TEXT_MSG, IrcControlCommand.RECV_USER_TEXT_MSG):
+                if cmd_data['source'] not in IRC_USERS:
+                    IRC_USERS.append(cmd_data['source'])
                 if cmd_data['source'] not in router_config['ignore']:
                     for msg in cmd_data['args']:
                         mmbl_conn.send({
