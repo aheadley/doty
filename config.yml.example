@@ -31,11 +31,14 @@ router:
   # the minimum length of an audio clip to bother transcribing, note that google
   # bills in 15s increments: https://cloud.google.com/speech-to-text/pricing
   min_buffer_len: 0.5
+  # length of time to store a buffer of the mixed audio stream
+  mixed_buffer_len: 120
   # username/nicks to ignore in IRC and Mumble, applies to both text and audio
   ignore: []
   # This will be spoken at bot startup, set to false or '' (empty string) to disable
   # https://www.youtube.com/watch?v=QrWAdq8e_uA
   startup_message: Reactor Online. Sensors Online. Weapons Online. All Systems Nominal.
+  enable_commands: true
 
 transcriber:
   google_cloud_auth: 'path/to/creds.json'

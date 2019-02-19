@@ -8,13 +8,18 @@ import threading
 import functools
 import hashlib
 import html
+import io
+import itertools
 import os
 import os.path
 import queue
+import requests
 import signal
 import ssl
+import struct
 import tempfile
 import time
+import wave
 import uuid
 from enum import (
     Enum,
@@ -59,6 +64,11 @@ WAV_HEADER_LEN = 44
 MAX_TRANSCRIPTION_TIME = 60.0
 BASE_CONFIG_FILENAME = 'config.yml.example'
 SOUNDCHUNK_SIZE = 1920
+SAMPLE_FRAME_FORMAT = '<h'
+SAMPLE_FRAME_SIZE = struct.calcsize(SAMPLE_FRAME_FORMAT)
+COMMAND_HELP_MESSAGE = """
+I know the following commands: !help | !moveto <mumble channel> | !say <text to speak> | !replay [seconds] | !clip [seconds]
+""".strip()
 
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 logging.basicConfig(level=LOG_LEVEL)
@@ -162,6 +172,104 @@ class QueuePipe:
             self._out.close()
             self._out.join_thread()
         except Exception: pass
+
+class SliceableDeque(collections.deque):
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            # deque doesn't handle slices, so we work around with
+            #   itertools.islice (which doesn't handle negatives in slices) and
+            #   a list(), negative steps are not supported
+            # @source https://stackoverflow.com/questions/10003143/how-to-slice-a-deque
+            if idx.start is not None and idx.start < 0:
+                idx = slice(len(self)+idx.start, idx.stop, idx.step)
+            if idx.stop is not None and idx.stop < 0:
+                idx = slice(idx.start, len(self)+idx.stop, idx.step)
+            return list(itertools.islice(self, idx.start, idx.stop, idx.step))
+        return super().__getitem__(self, idx)
+
+class MixingBuffer:
+    MIN_SILENCE_EXTENSION = 0.5
+
+    @staticmethod
+    def iter_frames(buf):
+        for frame in struct.iter_unpack(SAMPLE_FRAME_FORMAT, buf):
+            yield frame[0]
+
+    @staticmethod
+    def _mix_frame(left, right):
+        SCALE_VALUE = (2 ** ((SAMPLE_FRAME_SIZE * 8) - 1)) - 1
+        scale_factor = 1/SCALE_VALUE
+        left *= scale_factor
+        right *= scale_factor
+        out = (left + right) - (left * right)
+        return min(SCALE_VALUE, max(-SCALE_VALUE, int(out * SCALE_VALUE)))
+
+    def __init__(self, buffer_len, log=log):
+        self._log = log
+        self._buffer = SliceableDeque(
+            maxlen=self._seconds_to_frames(buffer_len),
+        )
+        self._reset()
+        self._log.debug('Using deque.maxlen=%d', self._buffer.maxlen)
+
+    def add_chunk(self, chunk):
+        if chunk.time < (self._current_head - self._frames_to_seconds(self._buffer.maxlen)):
+            # chunk is too far in the past, ignore it
+            self._log.debug('Ignoring very old chunk: %s', chunk.time)
+            return
+        if (chunk.time + chunk.duration) > self._current_head:
+            # chunk is ahead of us, fill with silence to mix against
+            diff = (chunk.time + chunk.duration) - self._current_head
+            if diff > self._frames_to_seconds(self._buffer.maxlen):
+                # the chunk is far ahead of us, drop the entire buffer
+                self._reset()
+            else:
+                self._extend_with_silence(diff)
+
+        buf_start = -self._seconds_to_frames(self._current_head - chunk.time)
+        for (offset, (orig, new)) in enumerate(zip(self._buffer[buf_start:], self.iter_frames(chunk.pcm))):
+            self._buffer[buf_start + offset] = self._mix_frame(orig, new)
+
+    def add_buffer(self, buf):
+        self._extend_with_silence(exact=True)
+        buf_duration = self._frames_to_seconds(len(list(self.iter_frames(buf))))
+        self._buffer.extend(self.iter_frames(buf))
+        self._current_head += buf_duration
+
+    def _extend_with_silence(self, silence_length=None, exact=False):
+        if silence_length is None:
+            now = time.time()
+            if now > self._current_head:
+                silence_length = now - self._current_head
+            else:
+                # self._current_head is in the future, don't need to come up to date
+                return
+        if not exact:
+            silence_length = max(silence_length, self.MIN_SILENCE_EXTENSION)
+        self._buffer.extend([0] * self._seconds_to_frames(silence_length))
+        self._current_head += silence_length
+
+    def _reset(self):
+        self._buffer.extend([0] * self._buffer.maxlen)
+        self._current_head = time.time()
+
+    def get_last(self, seconds):
+        seconds = min(self._frames_to_seconds(self._buffer.maxlen - 1), seconds)
+        frame_count = self._seconds_to_frames(seconds)
+        buf = b''.join(struct.pack(SAMPLE_FRAME_FORMAT, frame) for frame in self._buffer[-frame_count:])
+        # round to PYMUMBLE_AUDIO_PER_PACKET
+        return buf[len(buf) % SOUNDCHUNK_SIZE:]
+
+    def get_all(self):
+        buf = b''.join(struct.pack(SAMPLE_FRAME_FORMAT, frame) for frame in self._buffer)
+        # round to PYMUMBLE_AUDIO_PER_PACKET
+        return buf[len(buf) % SOUNDCHUNK_SIZE:]
+
+    def _seconds_to_frames(self, seconds):
+        return int(round((seconds / PYMUMBLE_AUDIO_PER_PACKET) * (SOUNDCHUNK_SIZE / SAMPLE_FRAME_SIZE)))
+
+    def _frames_to_seconds(self, frames):
+        return ((frames * SAMPLE_FRAME_SIZE) / SOUNDCHUNK_SIZE) * (PYMUMBLE_AUDIO_PER_PACKET)
 
 class MumbleControlCommand(Enum):
     EXIT = auto()
@@ -441,6 +549,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
     MMBL_CHANNELS = {}
     MMBL_USERS = {}
     AUDIO_BUFFERS = {}
+    MIXED_BUFFER = MixingBuffer(router_config['mixed_buffer_len'], log)
 
     mmbl_conn._swap()
     irc_conn._swap()
@@ -467,6 +576,20 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
             timestamp=last_chunk.timestamp + SHORT_POLL + dt,
         )
 
+    def buffer2wav(buf):
+        output = io.BytesIO()
+        with io.BytesIO() as output:
+            with wave.open(output, 'wb') as wav_output:
+                wav_output.setnchannels(1)
+                wav_output.setsampwidth(2)
+                wav_output.setframerate(PYMUMBLE_SAMPLERATE)
+                wav_output.writeframes(buf)
+                return output.getvalue()
+
+    def upload(handle):
+        resp = requests.post('https://0x0.st/', files={'file': handle})
+        return resp.text.strip()
+
     if router_config['startup_message']:
         say(router_config['startup_message'])
 
@@ -479,25 +602,64 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                 clean_nick = cmd_data['source'].split('!')[0]
                 if clean_nick not in router_config['ignore']:
                     for msg in cmd_data['arguments']:
-                        # !moveto command
-                        if msg.startswith('!moveto'):
-                            target_name = msg.split(' ', 1)[1].strip()
-                            mmbl_conn.send({
-                                'cmd': MumbleControlCommand.MOVE_TO_CHANNEL,
-                                'channel_name': target_name,
-                            })
-                        # !say command
-                        elif msg.startswith('!say'):
-                            say_msg = '{} said: {}'.format(
-                                denotify_username(clean_nick),
-                                msg.split(' ', 1)[1].strip(),
-                            )
-                            say(say_msg)
-                        else:
-                            mmbl_conn.send({
-                                'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
-                                'msg': '<{}> {}'.format(clean_nick, msg),
-                            })
+                        mmbl_conn.send({
+                            'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
+                            'msg': '<{}> {}'.format(clean_nick, msg),
+                        })
+                        if router_config['enable_commands']:
+                            # !help command
+                            if msg.startswith('!help'):
+                                irc_conn.send({
+                                    'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
+                                    'msg': COMMAND_HELP_MESSAGE,
+                                })
+                                mmbl_conn.send({
+                                    'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
+                                    'msg': COMMAND_HELP_MESSAGE,
+                                })
+                            # !moveto command
+                            if msg.startswith('!moveto'):
+                                target_name = msg.split(' ', 1)[1].strip()
+                                mmbl_conn.send({
+                                    'cmd': MumbleControlCommand.MOVE_TO_CHANNEL,
+                                    'channel_name': target_name,
+                                })
+                            # !say command
+                            if msg.startswith('!say'):
+                                say_msg = '{} said: {}'.format(
+                                    denotify_username(clean_nick),
+                                    msg.split(' ', 1)[1].strip(),
+                                )
+                                say(say_msg)
+                            # !replay command
+                            if msg.startswith('!replay'):
+                                try:
+                                    seconds = int(msg.strip().split(' ')[1])
+                                except (ValueError, IndexError):
+                                    seconds = router_config['mixed_buffer_len']
+                                mmbl_conn.send({
+                                    'cmd': MumbleControlCommand.SEND_AUDIO_MSG,
+                                    'buffer': MIXED_BUFFER.get_last(seconds),
+                                })
+                            # !clip command
+                            if msg.startswith('!clip'):
+                                try:
+                                    seconds = int(msg.strip().split(' ')[1])
+                                except (ValueError, IndexError):
+                                    seconds = router_config['mixed_buffer_len']
+                                with io.BytesIO(buffer2wav(MIXED_BUFFER.get_last(seconds))) as f:
+                                    url = upload(f)
+                                if url:
+                                    irc_conn.send({
+                                        'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
+                                        'msg': url,
+                                    })
+                                    mmbl_conn.send({
+                                        'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
+                                        'msg': url,
+                                    })
+                                else:
+                                    log.warning('Failed to upload audio clip')
             else:
                 log.warning('Recieved unknown command from IRC: %r', cmd_data)
 
@@ -558,19 +720,59 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                             'msg': '<{}> {}'.format(
                                 denotify_username(sender['name']),
                                 msg_data['message'])})
-
-                    # !moveto command
-                    if msg_data['message'].startswith('!moveto'):
-                        target_name = msg_data['message'].split(' ', 1)[1].strip()
-                        mmbl_conn.send({'cmd': MumbleControlCommand.MOVE_TO_CHANNEL, 'channel_name': target_name})
-                    # !say command
-                    if msg_data['message'].startswith('!say'):
-                        say_msg = msg_data['message'].split(' ', 1)[1].strip()
-                        say(say_msg, source_id=msg_data['actor'])
+                    if router_config['enable_commands']:
+                        # !help command
+                        if msg_data['message'].startswith('!help'):
+                            irc_conn.send({
+                                'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
+                                'msg': COMMAND_HELP_MESSAGE,
+                            })
+                            mmbl_conn.send({
+                                'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
+                                'msg': COMMAND_HELP_MESSAGE,
+                            })
+                        # !moveto command
+                        if msg_data['message'].startswith('!moveto'):
+                            target_name = msg_data['message'].split(' ', 1)[1].strip()
+                            mmbl_conn.send({'cmd': MumbleControlCommand.MOVE_TO_CHANNEL, 'channel_name': target_name})
+                        # !say command
+                        if msg_data['message'].startswith('!say'):
+                            say_msg = msg_data['message'].split(' ', 1)[1].strip()
+                            say(say_msg, source_id=msg_data['actor'])
+                        # !replay command
+                        if msg_data['message'].startswith('!replay'):
+                            try:
+                                seconds = int(msg_data['message'].strip().split(' ')[1])
+                            except (ValueError, IndexError):
+                                seconds = router_config['mixed_buffer_len']
+                            mmbl_conn.send({
+                                'cmd': MumbleControlCommand.SEND_AUDIO_MSG,
+                                'buffer': MIXED_BUFFER.get_last(seconds),
+                            })
+                        # !clip command
+                        if msg_data['message'].startswith('!clip'):
+                            try:
+                                seconds = int(msg_data['message'].strip().split(' ')[1])
+                            except (ValueError, IndexError):
+                                seconds = router_config['mixed_buffer_len']
+                            with io.BytesIO(buffer2wav(MIXED_BUFFER.get_last(seconds))) as f:
+                                url = upload(f)
+                            if url:
+                                irc_conn.send({
+                                    'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
+                                    'msg': url,
+                                })
+                                mmbl_conn.send({
+                                    'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
+                                    'msg': url,
+                                })
+                            else:
+                                log.warning('Failed to upload audio clip')
             elif event_type == PYMUMBLE_CLBK_SOUNDRECEIVED:
                 (sender, sound_chunk) = event_args
                 sender_data = AUDIO_BUFFERS[sender['session']]
                 if sender['name'] not in router_config['ignore']:
+                    MIXED_BUFFER.add_chunk(sound_chunk)
                     if sender_data['last_sample'] is None and len(sender_data['buffer']) == 0:
                         log.debug('Started recieving audio for: %s', sender['name'])
                     elif len(sender_data['buffer']) > 0:
@@ -627,6 +829,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                     cmd_data['txid'], cmd_data['actor'], len(cmd_data['buffer']))
                 cmd_data['cmd'] = MumbleControlCommand.SEND_AUDIO_MSG
                 mmbl_conn.send(cmd_data)
+                MIXED_BUFFER.add_buffer(cmd_data['buffer'])
                 irc_conn.send({
                     'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
                     'msg': cmd_data['msg'],
