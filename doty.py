@@ -637,9 +637,11 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                                     seconds = int(msg.strip().split(' ')[1])
                                 except (ValueError, IndexError):
                                     seconds = router_config['mixed_buffer_len']
+                                buf = MIXED_BUFFER.get_last(seconds)
+                                MIXED_BUFFER.add_buffer(buf)
                                 mmbl_conn.send({
                                     'cmd': MumbleControlCommand.SEND_AUDIO_MSG,
-                                    'buffer': MIXED_BUFFER.get_last(seconds),
+                                    'buffer': buf,
                                 })
                             # !clip command
                             if msg.startswith('!clip'):
@@ -745,9 +747,11 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                                 seconds = int(msg_data['message'].strip().split(' ')[1])
                             except (ValueError, IndexError):
                                 seconds = router_config['mixed_buffer_len']
+                            buf = MIXED_BUFFER.get_last(seconds)
+                            MIXED_BUFFER.add_buffer(buf)
                             mmbl_conn.send({
                                 'cmd': MumbleControlCommand.SEND_AUDIO_MSG,
-                                'buffer': MIXED_BUFFER.get_last(seconds),
+                                'buffer': buf,
                             })
                         # !clip command
                         if msg_data['message'].startswith('!clip'):
