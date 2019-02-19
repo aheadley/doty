@@ -1,5 +1,5 @@
 # doty
-Doty, take this down...
+>[Doty, take this down...](https://www.youtube.com/watch?v=JiG_tOoqfIM)
 
 Doty is (primarily) a Mumble <> IRC bridge/transcription bot. It will transcribe any speech
 in a Mumble channel and output it to IRC, while copying or speaking any IRC
@@ -13,7 +13,7 @@ Mumble just from the transcription.
 ## Pre-requisites
 
 You will need a [Google Cloud](https://cloud.google.com/) account, along with
-a JSON blob of credentials authorized to use the transcription and text-to-speech
+a [JSON blob of credentials](https://cloud.google.com/iam/docs/creating-managing-service-account-keys) authorized to use the transcription and text-to-speech
 services.
 
 Note that because of the way Google's billing for the transcription works
@@ -63,3 +63,5 @@ optional arguments:
   -S, --no-speaker      Do not start the speaker process
   -A, --no-autorestart  Don't automatically restart crashed processes
 ~~~~
+
+Once running, you can use `!help` (in IRC or Mumble) to see the available commands.
