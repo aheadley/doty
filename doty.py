@@ -204,7 +204,9 @@ class MixingBuffer:
         out = (left + right) - (left * right)
         return min(SCALE_VALUE, max(-SCALE_VALUE, int(out * SCALE_VALUE)))
 
-    def __init__(self, buffer_len, log=log):
+    def __init__(self, buffer_len, log=None):
+        if log is None:
+            log = getWorkerLogger('mixer', level=LOG_LEVEL)
         self._log = log
         self._buffer = SliceableDeque(
             maxlen=self._seconds_to_frames(buffer_len),
@@ -273,16 +275,36 @@ class MixingBuffer:
 
 class MumbleControlCommand(Enum):
     EXIT = auto()
-    SEND_CHANNEL_TEXT_MSG = auto()
-    SEND_USER_TEXT_MSG = auto()
-    SEND_AUDIO_MSG = auto()
+    USER_CREATE = auto()
+    USER_UPDATE = auto()
+    USER_REMOVE = auto()
+    CHANNEL_CREATE = auto()
+    CHANNEL_UPDATE = auto()
+    CHANNEL_REMOVE = auto()
     MOVE_TO_CHANNEL = auto()
+
+    RECV_CHANNEL_TEXT_MSG = auto()
+    SEND_CHANNEL_TEXT_MSG = auto()
+    RECV_USER_TEXT_MSG = auto()
+    SEND_USER_TEXT_MSG = auto()
+
+    RECV_CHANNEL_AUDIO = auto()
+    SEND_CHANNEL_AUDIO_MSG = auto()
+    RECV_USER_AUDIO = auto()
+    SEND_USER_AUDIO_MSG = auto()
 
 class IrcControlCommand(Enum):
     EXIT = auto()
-    SEND_CHANNEL_TEXT_MSG = auto()
-    SEND_CHANNEL_ACTION = auto()
+    USER_CREATE = auto()
+    USER_UPDATE = auto()
+    USER_REMOVE = auto()
+
     RECV_CHANNEL_TEXT_MSG = auto()
+    SEND_CHANNEL_TEXT_MSG = auto()
+    RECV_USER_TEXT_MSG = auto()
+    SEND_USER_TEXT_MSG = auto()
+    RECV_CHANNEL_ACTION = auto()
+    SEND_CHANNEL_ACTION = auto()
 
 class DialogflowControlCommand(Enum):
     EXIT = auto()
@@ -322,17 +344,43 @@ def proc_irc(irc_config, router_conn):
     else:
         conn_factory = irc.connection.Factory()
 
-    e2d = lambda ev: {'type': ev.type, 'source': ev.source, 'target': ev.target, 'arguments': ev.arguments, 'tags': ev.tags}
+    e2d = lambda ev: {
+        'type': ev.type,
+        'source': ev.source.split('!')[0] if '!' in ev.source else ev.source,
+        'target': ev.target,
+        'args': ev.arguments,
+    }
     def handle_irc_message(conn, event):
         log.debug('Recieved IRC event: %s', event)
+        cmd_data = e2d(event)
         if event.type == 'pubmsg':
-            cmd_data = e2d(event)
             cmd_data['cmd'] = IrcControlCommand.RECV_CHANNEL_TEXT_MSG
-            router_conn.send(cmd_data)
+        elif event.type == 'privmsg':
+            cmd_data['cmd'] = IrcControlCommand.RECV_USER_TEXT_MSG
+        elif event.type == 'action':
+            cmd_data['cmd'] = IrcControlCommand.RECV_CHANNEL_ACTION
+        else:
+            log.warning('Unrecognized event type: %s', event.type)
+            return
+        router_conn.send(cmd_data)
+    for ev_type in ['pubmsg', 'privmsg', 'action']:
+        client.add_global_handler(ev_type, handle_irc_message)
 
-    client.add_global_handler('pubmsg', handle_irc_message)
-    client.add_global_handler('privmsg', handle_irc_message)
-    # client.add_global_handler('action', handle_irc_message)
+    def handle_membership_change(conn, event):
+        log.debug('Recieved IRC join/part: %s', event)
+        cmd_data = e2d(event)
+        if event.type == 'join':
+            cmd_data['cmd'] = IrcControlCommand.USER_CREATE
+        elif event.type in ['kick', 'part', 'quit']:
+            cmd_data['cmd'] = IrcControlCommand.USER_REMOVE
+        elif event.type == 'nick':
+            cmd_data['cmd'] = IrcControlCommand.USER_UPDATE
+        else:
+            log.warning('Unrecognized event type: %s', event.type)
+            return
+        router_conn.send(cmd_data)
+    for ev_type in ['join', 'kick', 'part', 'quit', 'nick']:
+        client.add_global_handler(ev_type, handle_membership_change)
 
     log.info('IRC client running')
     while keep_running:
@@ -353,6 +401,10 @@ def proc_irc(irc_config, router_conn):
             elif cmd_data['cmd'] == IrcControlCommand.SEND_CHANNEL_TEXT_MSG:
                 log.info('Sending message: %s', cmd_data['msg'])
                 server.privmsg(irc_config['channel'], cmd_data['msg'])
+            elif cmd_data['cmd'] == IrcControlCommand.SEND_USER_TEXT_MSG:
+                log.info('Sending message to user: %s -> %s',
+                    cmd_data['user'], cmd_data['msg'])
+                server.privmsg(cmd_data['user'], cmd_data['msg'])
             elif cmd_data['cmd'] == IrcControlCommand.SEND_CHANNEL_ACTION:
                 log.info('Sending action: %s', cmd_data['msg'])
                 server.action(irc_config['channel'], cmd_data['msg'])
@@ -366,6 +418,17 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
     keep_running = True
     clbk_lock = threading.Lock()
 
+    EVENT_MAP = {
+        PYMUMBLE_CLBK_USERCREATED:          MumbleControlCommand.USER_CREATE,
+        PYMUMBLE_CLBK_USERUPDATED:          MumbleControlCommand.USER_UPDATE,
+        PYMUMBLE_CLBK_USERREMOVED:          MumbleControlCommand.USER_REMOVE,
+        PYMUMBLE_CLBK_CHANNELCREATED:       MumbleControlCommand.CHANNEL_CREATE,
+        PYMUMBLE_CLBK_CHANNELUPDATED:       MumbleControlCommand.CHANNEL_UPDATE,
+        PYMUMBLE_CLBK_CHANNELREMOVED:       MumbleControlCommand.CHANNEL_REMOVE,
+        PYMUMBLE_CLBK_TEXTMESSAGERECEIVED:  MumbleControlCommand.RECV_CHANNEL_TEXT_MSG,
+        PYMUMBLE_CLBK_SOUNDRECEIVED:        MumbleControlCommand.RECV_CHANNEL_AUDIO,
+    }
+
     log.debug('Starting mumble process')
     mmbl = pymumble.Mumble(mmbl_config['server'],
         mmbl_config['username'], password=mmbl_config['password'],
@@ -376,17 +439,43 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
     mmbl.set_receive_sound(True)
 
     log.debug('Setting up callbacks')
-    def handle_callback(clbk_type, *args):
-        args = normalize_callback_args(clbk_type, args)
-        if clbk_type == PYMUMBLE_CLBK_SOUNDRECEIVED:
+    def handle_callback(ev_type, *args):
+        args = normalize_callback_args(ev_type, args)
+        if ev_type == PYMUMBLE_CLBK_SOUNDRECEIVED:
             # avoid memory leak in pymumble
             try:
                 mmbl.users[args[0]['session']].sound.get_sound()
             except Exception: pass
         else:
-            log.debug('Callback event: %s => %r', clbk_type, args)
+            log.debug('Callback event: %s => %r', ev_type, args)
+
+        cmd_data = {'cmd': EVENT_MAP.get(ev_type, None)}
+        if cmd_data['cmd'] in (MumbleControlCommand.USER_CREATE, MumbleControlCommand.USER_UPDATE, MumbleControlCommand.USER_REMOVE):
+            cmd_data['user'] = args[0]
+            if cmd_data['cmd'] == MumbleControlCommand.USER_UPDATE:
+                cmd_data['changes'] = args[1]
+            elif cmd_data['cmd'] == MumbleControlCommand.USER_REMOVE:
+                cmd_data['session'] = args[1]
+        elif cmd_data['cmd'] in (MumbleControlCommand.CHANNEL_CREATE, MumbleControlCommand.CHANNEL_UPDATE, MumbleControlCommand.CHANNEL_REMOVE):
+            cmd_data['channel'] = args[0]
+            if cmd_data['cmd'] == MumbleControlCommand.CHANNEL_UPDATE:
+                cmd_data['changes'] = args[1]
+        elif cmd_data['cmd'] == MumbleControlCommand.RECV_CHANNEL_TEXT_MSG:
+            if not args[0]['channel_id']:
+                # it's a private message
+                cmd_data['cmd'] = MumbleControlCommand.RECV_USER_TEXT_MSG
+            cmd_data.update(args[0])
+        elif cmd_data['cmd'] == MumbleControlCommand.RECV_CHANNEL_AUDIO:
+            if not args[0]['channel_id']:
+                # it's a private message
+                cmd_data['cmd'] = MumbleControlCommand.RECV_USER_AUDIO
+            cmd_data.update(args[0])
+            cmd_data['chunk'] = args[1]
+        else:
+            log.warning('Unrecognized event type: %s', ev_type)
+            return
         with clbk_lock:
-            router_conn.send((clbk_type, args))
+            router_conn.send(cmd_data)
 
     for callback_type in mmbl.callbacks.get_callbacks_list():
         clbk = denote_callback(callback_type)(handle_callback)
@@ -395,7 +484,8 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
     log.debug('Starting mumble connection')
     mmbl.start()
     mmbl.is_ready()
-    log.info('Connected to mumble server: %s', mmbl_config['server'])
+    log.info('Connected to mumble server: %s:%d',
+        mmbl_config['server'], mmbl_config['port'])
 
     log.debug('Entering control loop')
     while keep_running:
@@ -423,7 +513,7 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
                     mmbl.channels.new_channel(0, cmd_data['channel_name'])
                 else:
                     mmbl.users.myself.move_in(target_channel['channel_id'])
-            elif cmd_data['cmd'] == MumbleControlCommand.SEND_AUDIO_MSG:
+            elif cmd_data['cmd'] == MumbleControlCommand.SEND_CHANNEL_AUDIO_MSG:
                 log.info('Sending audio message: %d bytes', len(cmd_data['buffer']))
                 mmbl.sound_output.add_sound(cmd_data['buffer'])
             else:
@@ -448,8 +538,8 @@ def proc_transcriber(transcription_config, router_conn):
             encoding=gcloud_speech.enums.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=PYMUMBLE_SAMPLERATE,
             language_code=transcription_config['language'],
-            speech_contexts=[gcloud_speech.types.SpeechContext(phrases=phrases \
-                + transcription_config['hint_phrases'])],
+            speech_contexts=[gcloud_speech.types.SpeechContext(phrases=list(set(phrases \
+                + transcription_config['hint_phrases'])))],
         )
         response = speech_client.recognize(speech_config, speech_content)
         for result in response.results:
@@ -548,6 +638,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
 
     MMBL_CHANNELS = {}
     MMBL_USERS = {}
+    IRC_USERS = []
     AUDIO_BUFFERS = {}
     MIXED_BUFFER = MixingBuffer(router_config['mixed_buffer_len'], log)
 
@@ -598,13 +689,12 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
         ready = QueuePipe.wait(mmbl_conn, irc_conn, trans_conn, speak_conn, master_conn, timeout=SHORT_POLL)
         if irc_conn in ready:
             cmd_data = irc_conn.recv()
-            if cmd_data['cmd'] == IrcControlCommand.RECV_CHANNEL_TEXT_MSG:
-                clean_nick = cmd_data['source'].split('!')[0]
-                if clean_nick not in router_config['ignore']:
-                    for msg in cmd_data['arguments']:
+            if cmd_data['cmd'] in (IrcControlCommand.RECV_CHANNEL_TEXT_MSG, IrcControlCommand.RECV_USER_TEXT_MSG):
+                if cmd_data['source'] not in router_config['ignore']:
+                    for msg in cmd_data['args']:
                         mmbl_conn.send({
                             'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
-                            'msg': '<{}> {}'.format(clean_nick, msg),
+                            'msg': '<{}> {}'.format(cmd_data['source'], msg),
                         })
                         if router_config['enable_commands']:
                             # !help command
@@ -627,7 +717,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                             # !say command
                             if msg.startswith('!say'):
                                 say_msg = '{} said: {}'.format(
-                                    denotify_username(clean_nick),
+                                    denotify_username(cmd_data['source']),
                                     msg.split(' ', 1)[1].strip(),
                                 )
                                 say(say_msg)
@@ -640,7 +730,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                                 buf = MIXED_BUFFER.get_last(seconds)
                                 MIXED_BUFFER.add_buffer(buf)
                                 mmbl_conn.send({
-                                    'cmd': MumbleControlCommand.SEND_AUDIO_MSG,
+                                    'cmd': MumbleControlCommand.SEND_CHANNEL_AUDIO_MSG,
                                     'buffer': buf,
                                 })
                             # !clip command
@@ -662,69 +752,87 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                                     })
                                 else:
                                     log.warning('Failed to upload audio clip')
+            elif cmd_data['cmd'] == IrcControlCommand.USER_CREATE:
+                if cmd_data['source'] not in IRC_USERS:
+                    IRC_USERS.append(cmd_data['source'])
+                mmbl_conn.send({
+                    'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
+                    'msg': '* {} has joined the IRC channel'.format(denotify_username(cmd_data['source']))
+                })
+            elif cmd_data['cmd'] == IrcControlCommand.USER_UPDATE:
+                if cmd_data['source'] in IRC_USERS:
+                    IRC_USERS.remove(cmd_data['source'])
+                IRC_USERS.append(cmd_data['target'])
+                mmbl_conn.send({
+                    'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
+                    'msg': '* {} is now known as {} in IRC'.format(
+                        denotify_username(cmd_data['source']),
+                        denotify_username(cmd_data['target']),
+                )})
+            elif cmd_data['cmd'] == IrcControlCommand.USER_REMOVE:
+                if cmd_data['source'] in IRC_USERS:
+                    IRC_USERS.remove(cmd_data['source'])
+                mmbl_conn.send({
+                    'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
+                    'msg': '* {} has left the IRC channel'.format(denotify_username(cmd_data['source']))
+                })
             else:
                 log.warning('Recieved unknown command from IRC: %r', cmd_data)
 
         if mmbl_conn in ready:
-            (event_type, event_args) = mmbl_conn.recv()
-            if event_type != PYMUMBLE_CLBK_SOUNDRECEIVED:
-                # sound events are way too noisy
-                log.debug('Recieved event from mumble: %s => %r', event_type, event_args)
-
-            if event_type == PYMUMBLE_CLBK_USERCREATED:
-                user_data = event_args[0]
-                MMBL_USERS[user_data['session']] = user_data
-                AUDIO_BUFFERS[user_data['session']] = {
+            cmd_data = mmbl_conn.recv()
+            if cmd_data['cmd'] == MumbleControlCommand.USER_CREATE:
+                MMBL_USERS[cmd_data['user']['session']] = cmd_data['user']
+                AUDIO_BUFFERS[cmd_data['user']['session']] = {
                     'buffer': collections.deque(
                         maxlen=int(MAX_TRANSCRIPTION_TIME / PYMUMBLE_AUDIO_PER_PACKET) - 1),
                     'last_sample': None,
                 }
-                irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_ACTION,
+                irc_conn.send({
+                    'cmd': IrcControlCommand.SEND_CHANNEL_ACTION,
                     'msg': '{} has connected in channel: {}'.format(
-                        denotify_username(user_data['name']),
-                        MMBL_CHANNELS[user_data['channel_id']]['name'],
-                        )})
-            elif event_type == PYMUMBLE_CLBK_USERUPDATED:
-                (user_data, changes) = event_args
-                MMBL_USERS[user_data['session']].update(changes)
-                if 'channel_id' in changes:
-                    irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_ACTION,
+                        denotify_username(cmd_data['user']['name']),
+                        MMBL_CHANNELS[cmd_data['user']['channel_id']]['name'],
+                )})
+            elif cmd_data['cmd'] == MumbleControlCommand.USER_UPDATE:
+                MMBL_USERS[cmd_data['user']['session']].update(cmd_data['changes'])
+                if 'channel_id' in cmd_data['changes']:
+                    irc_conn.send({
+                        'cmd': IrcControlCommand.SEND_CHANNEL_ACTION,
                         'msg': '{} has joined channel: {}'.format(
-                            denotify_username(user_data['name']),
-                            MMBL_CHANNELS[user_data['channel_id']]['name'],
-                            )})
-            elif event_type == PYMUMBLE_CLBK_USERREMOVED:
-                (user_data, session_data) = event_args
-                AUDIO_BUFFERS[user_data['session']]['buffer'].clear()
-                del MMBL_USERS[user_data['session']]
-                del AUDIO_BUFFERS[user_data['session']]
-                irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_ACTION,
+                            denotify_username(cmd_data['user']['name']),
+                            MMBL_CHANNELS[cmd_data['user']['channel_id']]['name'],
+                    )})
+            elif cmd_data['cmd'] == MumbleControlCommand.USER_REMOVE:
+                AUDIO_BUFFERS[cmd_data['user']['session']]['buffer'].clear()
+                del MMBL_USERS[cmd_data['user']['session']]
+                del AUDIO_BUFFERS[cmd_data['user']['session']]
+                irc_conn.send({
+                    'cmd': IrcControlCommand.SEND_CHANNEL_ACTION,
                     'msg': '{} has disconnected'.format(
-                        denotify_username(user_data['name']),
-                        )})
-            elif event_type == PYMUMBLE_CLBK_CHANNELCREATED:
-                channel_data = event_args[0]
-                MMBL_CHANNELS[channel_data['channel_id']] = channel_data
-            elif event_type == PYMUMBLE_CLBK_CHANNELUPDATED:
-                (channel_data, changes) = event_args
-                MMBL_CHANNELS[channel_data['channel_id']].update(changes)
-            elif event_type == PYMUMBLE_CLBK_CHANNELREMOVED:
-                channel_data = event_args[0]
-                del MMBL_CHANNELS[channel_data['channel_id']]
-            elif event_type == PYMUMBLE_CLBK_TEXTMESSAGERECEIVED:
-                msg_data = event_args[0]
-                sender = MMBL_USERS[msg_data['actor']]
+                        denotify_username(cmd_data['user']['name']),
+                )})
+            elif cmd_data['cmd'] == MumbleControlCommand.CHANNEL_CREATE:
+                MMBL_CHANNELS[cmd_data['channel']['channel_id']] = cmd_data['channel']
+            elif cmd_data['cmd'] == MumbleControlCommand.CHANNEL_UPDATE:
+                MMBL_CHANNELS[cmd_data['channel']['channel_id']].update(cmd_data['changes'])
+            elif cmd_data['cmd'] == MumbleControlCommand.CHANNEL_REMOVE:
+                del MMBL_CHANNELS[cmd_data['channel']['channel_id']]
+            elif cmd_data['cmd'] in (MumbleControlCommand.RECV_CHANNEL_TEXT_MSG, MumbleControlCommand.RECV_USER_TEXT_MSG):
+                sender = MMBL_USERS[cmd_data['actor']]
                 if sender['name'] in router_config['ignore']:
                     log.info('Ignoring text message from user: %s', sender['name'])
                 else:
-                    if msg_data['channel_id']:
-                        irc_conn.send({'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
+                    if cmd_data['channel_id']:
+                        irc_conn.send({
+                            'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
                             'msg': '<{}> {}'.format(
                                 denotify_username(sender['name']),
-                                msg_data['message'])})
+                                cmd_data['message'],
+                        )})
                     if router_config['enable_commands']:
                         # !help command
-                        if msg_data['message'].startswith('!help'):
+                        if cmd_data['message'].startswith('!help'):
                             irc_conn.send({
                                 'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
                                 'msg': COMMAND_HELP_MESSAGE,
@@ -734,29 +842,32 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                                 'msg': COMMAND_HELP_MESSAGE,
                             })
                         # !moveto command
-                        if msg_data['message'].startswith('!moveto'):
-                            target_name = msg_data['message'].split(' ', 1)[1].strip()
-                            mmbl_conn.send({'cmd': MumbleControlCommand.MOVE_TO_CHANNEL, 'channel_name': target_name})
+                        if cmd_data['message'].startswith('!moveto'):
+                            target_name = cmd_data['message'].split(' ', 1)[1].strip()
+                            mmbl_conn.send({
+                                'cmd': MumbleControlCommand.MOVE_TO_CHANNEL,
+                                'channel_name': target_name
+                            })
                         # !say command
-                        if msg_data['message'].startswith('!say'):
-                            say_msg = msg_data['message'].split(' ', 1)[1].strip()
-                            say(say_msg, source_id=msg_data['actor'])
+                        if cmd_data['message'].startswith('!say'):
+                            say_msg = cmd_data['message'].split(' ', 1)[1].strip()
+                            say(say_msg, source_id=cmd_data['actor'])
                         # !replay command
-                        if msg_data['message'].startswith('!replay'):
+                        if cmd_data['message'].startswith('!replay'):
                             try:
-                                seconds = int(msg_data['message'].strip().split(' ')[1])
+                                seconds = int(cmd_data['message'].strip().split(' ')[1])
                             except (ValueError, IndexError):
                                 seconds = router_config['mixed_buffer_len']
                             buf = MIXED_BUFFER.get_last(seconds)
                             MIXED_BUFFER.add_buffer(buf)
                             mmbl_conn.send({
-                                'cmd': MumbleControlCommand.SEND_AUDIO_MSG,
+                                'cmd': MumbleControlCommand.SEND_CHANNEL_AUDIO_MSG,
                                 'buffer': buf,
                             })
                         # !clip command
-                        if msg_data['message'].startswith('!clip'):
+                        if cmd_data['message'].startswith('!clip'):
                             try:
-                                seconds = int(msg_data['message'].strip().split(' ')[1])
+                                seconds = int(cmd_data['message'].strip().split(' ')[1])
                             except (ValueError, IndexError):
                                 seconds = router_config['mixed_buffer_len']
                             with io.BytesIO(buffer2wav(MIXED_BUFFER.get_last(seconds))) as f:
@@ -772,13 +883,12 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                                 })
                             else:
                                 log.warning('Failed to upload audio clip')
-            elif event_type == PYMUMBLE_CLBK_SOUNDRECEIVED:
-                (sender, sound_chunk) = event_args
-                sender_data = AUDIO_BUFFERS[sender['session']]
-                if sender['name'] not in router_config['ignore']:
-                    MIXED_BUFFER.add_chunk(sound_chunk)
+            elif cmd_data['cmd'] in (MumbleControlCommand.RECV_CHANNEL_AUDIO, MumbleControlCommand.RECV_USER_AUDIO):
+                sender_data = AUDIO_BUFFERS[cmd_data['session']]
+                if cmd_data['name'] not in router_config['ignore']:
+                    MIXED_BUFFER.add_chunk(cmd_data['chunk'])
                     if sender_data['last_sample'] is None and len(sender_data['buffer']) == 0:
-                        log.debug('Started recieving audio for: %s', sender['name'])
+                        log.debug('Started recieving audio for: %s', cmd_data['name'])
                     elif len(sender_data['buffer']) > 0:
                         # we've already gotten audio for this user
                         last_chunk = sender_data['buffer'][-1]
@@ -787,7 +897,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                             #   length at that
                             dt = router_config['wait_time']
                         else:
-                            dt = min(sound_chunk.time - last_chunk.time, router_config['wait_time'])
+                            dt = min(cmd_data['chunk'].time - last_chunk.time, router_config['wait_time'])
 
                         # check if we need to insert silence
                         if dt > (PYMUMBLE_AUDIO_PER_PACKET * 2):
@@ -797,12 +907,10 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                                     missing_packets, dt, missing_packets * PYMUMBLE_AUDIO_PER_PACKET)
                                 sender_data['buffer'].extend(
                                     silent_chunk(last_chunk, i) for i in range(missing_packets))
-                    sender_data['buffer'].append(sound_chunk)
+                    sender_data['buffer'].append(cmd_data['chunk'])
                     sender_data['last_sample'] = time.time()
-            elif event_type == PYMUMBLE_CLBK_CONNECTED:
-                pass
             else:
-                log.warning('Unrecognized mumble event type: %s => %r', event_type, event_args)
+                log.warning('Unrecognized command from mumble: %r', cmd_data)
 
         if trans_conn in ready:
             cmd_data = trans_conn.recv()
@@ -831,7 +939,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
             if cmd_data['cmd'] == SpeakerControlCommand.SPEAK_MESSAGE_RESPONSE:
                 log.debug('Got speaker response: txid=%s actor=%d len=%d b',
                     cmd_data['txid'], cmd_data['actor'], len(cmd_data['buffer']))
-                cmd_data['cmd'] = MumbleControlCommand.SEND_AUDIO_MSG
+                cmd_data['cmd'] = MumbleControlCommand.SEND_CHANNEL_AUDIO_MSG
                 mmbl_conn.send(cmd_data)
                 MIXED_BUFFER.add_buffer(cmd_data['buffer'])
                 irc_conn.send({
@@ -866,7 +974,9 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                     trans_conn.send({'cmd': TranscriberControlCommand.TRANSCRIBE_MESSAGE,
                         'actor': user['session'],
                         'buffer': audio_buffer,
-                        'phrases': [u['name'] for u in MMBL_USERS.values()] + [router_config['activation_word']],
+                        'phrases': [u['name'] for u in MMBL_USERS.values()] \
+                            + [router_config['activation_word']] \
+                            + IRC_USERS,
                         'txid': txid,
                     })
                     data['buffer'].clear()
