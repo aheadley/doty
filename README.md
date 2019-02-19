@@ -63,3 +63,5 @@ optional arguments:
   -S, --no-speaker      Do not start the speaker process
   -A, --no-autorestart  Don't automatically restart crashed processes
 ~~~~
+
+Once running, you can use `!help` (in IRC or Mumble) to see the available commands.
