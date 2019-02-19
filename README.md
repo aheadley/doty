@@ -13,7 +13,7 @@ Mumble just from the transcription.
 ## Pre-requisites
 
 You will need a [Google Cloud](https://cloud.google.com/) account, along with
-a JSON blob of credentials authorized to use the transcription and text-to-speech
+a [JSON blob of credentials](https://cloud.google.com/iam/docs/creating-managing-service-account-keys) authorized to use the transcription and text-to-speech
 services.
 
 Note that because of the way Google's billing for the transcription works
