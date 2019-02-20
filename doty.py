@@ -13,7 +13,6 @@ import itertools
 import os
 import os.path
 import queue
-import requests
 import signal
 import ssl
 import struct
@@ -26,7 +25,17 @@ from enum import (
     auto,
 )
 
+import contexttimer
+import irc.client
+import irc.connection
+import numpy
+import requests
 import yaml
+
+from bs4 import BeautifulSoup
+from google.cloud import speech as gcloud_speech
+from google.cloud import texttospeech as gcloud_texttospeech
+from numpy_ringbuffer import RingBuffer
 import pymumble_py3 as pymumble
 from pymumble_py3.constants import (
     PYMUMBLE_AUDIO_PER_PACKET,
@@ -44,12 +53,6 @@ from pymumble_py3.constants import (
 from pymumble_py3.errors import (
     UnknownChannelError,
 )
-from google.cloud import speech as gcloud_speech
-from google.cloud import texttospeech as gcloud_texttospeech
-import irc.client
-import irc.connection
-from bs4 import BeautifulSoup
-import contexttimer
 
 
 APP_NAME = 'doty'
@@ -121,7 +124,7 @@ def denote_callback(clbk_type):
     return outer_wrapper
 
 generate_uuid = lambda: str(uuid.uuid1())
-sha1sum = lambda data: hashlib.sha1(data if type(data) is bytes else data.encode('utf-8')).hexdigest()
+sha1sum = lambda data: hashlib.sha1(data if type(data) in (bytes, bytearray) else data.encode('utf-8')).hexdigest()
 
 def denotify_username(username):
     if len(username) > 1:
@@ -173,70 +176,105 @@ class QueuePipe:
             self._out.join_thread()
         except Exception: pass
 
-class SliceableDeque(collections.deque):
-    def __getitem__(self, idx):
+class AssignableRingBuffer(RingBuffer):
+    def _normalize_slice(self, idx):
+        if idx.step not in (None, 1):
+            raise IndexError('Slice stepping not supported')
+        if idx.start is None:
+            idx = slice(0, idx.stop, idx.step)
+        elif idx.start < 0:
+            idx = slice(self._capacity + idx.start, idx.stop, idx.step)
+        if idx.stop in (None, 0):
+            idx = slice(idx.start, self._capacity, idx.step)
+        elif idx.stop < 0:
+            idx = slice(idx.start, self._capacity + idx.stop, idx.step)
+        return idx
+
+    def __setitem__(self, idx, value):
         if isinstance(idx, slice):
-            # deque doesn't handle slices, so we work around with
-            #   itertools.islice (which doesn't handle negatives in slices) and
-            #   a list(), negative steps are not supported
-            # @source https://stackoverflow.com/questions/10003143/how-to-slice-a-deque
-            if idx.start is not None and idx.start < 0:
-                idx = slice(len(self)+idx.start, idx.stop, idx.step)
-            if idx.stop is not None and idx.stop < 0:
-                idx = slice(idx.start, len(self)+idx.stop, idx.step)
-            return list(itertools.islice(self, idx.start, idx.stop, idx.step))
-        return super().__getitem__(self, idx)
+            idx = self._normalize_slice(idx)
+            assert (idx.stop - idx.start) == len(value), 'len(slice) != len(value)'
+            if self._left_index+idx.stop < self._capacity:
+                # simple case, doesn't wrap
+                self._arr[self._left_index+idx.start:self._left_index+idx.stop] = value
+            else:
+                # array wraps around
+                sl_start = (self._left_index + idx.start) % self._capacity
+                sl1 = value[:(self._capacity-sl_start) % len(value)]
+                self._arr[sl_start:sl_start+len(sl1)] = sl1
+                sl2 = value[len(sl1):]
+                self._arr[sl_start+len(sl1):sl_start+len(sl1)+len(sl2)] = sl2
+        elif isinstance(idx, int):
+            if idx >= 0:
+                self._arr[self._left_index+idx % self._capacity] = value
+            else:
+                self._arr[self._capacity+idx] = value
+        else:
+            raise IndexError('Invalid index type: %s'.format(idx))
 
 class MixingBuffer:
     MIN_SILENCE_EXTENSION = 0.5
+    DTYPE_SHORT = numpy.dtype(SAMPLE_FRAME_FORMAT)
+    DTYPE_FLOAT = numpy.float32
 
     @staticmethod
-    def iter_frames(buf):
-        for frame in struct.iter_unpack(SAMPLE_FRAME_FORMAT, buf):
-            yield frame[0]
-
-    @staticmethod
-    def _mix_frame(left, right):
+    def _mix_frames(left, right):
         SCALE_VALUE = (2 ** ((SAMPLE_FRAME_SIZE * 8) - 1)) - 1
         scale_factor = 1/SCALE_VALUE
-        left *= scale_factor
-        right *= scale_factor
+        left = left.astype(MixingBuffer.DTYPE_FLOAT) * scale_factor
+        right = right.astype(MixingBuffer.DTYPE_FLOAT) * scale_factor
         out = (left + right) - (left * right)
-        return min(SCALE_VALUE, max(-SCALE_VALUE, int(out * SCALE_VALUE)))
+        out *= SCALE_VALUE
+        out = numpy.clip(out, -SCALE_VALUE, SCALE_VALUE).astype(MixingBuffer.DTYPE_SHORT)
+        return out
 
     def __init__(self, buffer_len, log=None):
         if log is None:
             log = getWorkerLogger('mixer', level=LOG_LEVEL)
         self._log = log
-        self._buffer = SliceableDeque(
-            maxlen=self._seconds_to_frames(buffer_len),
-        )
+        self._buffer_len = buffer_len
         self._reset()
-        self._log.debug('Using deque.maxlen=%d', self._buffer.maxlen)
 
     def add_chunk(self, chunk):
-        if chunk.time < (self._current_head - self._frames_to_seconds(self._buffer.maxlen)):
+        if chunk.time < (self._current_head - self._frames_to_seconds(len(self._buffer))):
             # chunk is too far in the past, ignore it
             self._log.debug('Ignoring very old chunk: %s', chunk.time)
             return
         if (chunk.time + chunk.duration) > self._current_head:
             # chunk is ahead of us, fill with silence to mix against
             diff = (chunk.time + chunk.duration) - self._current_head
-            if diff > self._frames_to_seconds(self._buffer.maxlen):
+            if diff > self._frames_to_seconds(len(self._buffer)):
                 # the chunk is far ahead of us, drop the entire buffer
                 self._reset()
             else:
                 self._extend_with_silence(diff)
 
-        buf_start = -self._seconds_to_frames(self._current_head - chunk.time)
-        for (offset, (orig, new)) in enumerate(zip(self._buffer[buf_start:], self.iter_frames(chunk.pcm))):
-            self._buffer[buf_start + offset] = self._mix_frame(orig, new)
+        buf = numpy.frombuffer(chunk.pcm, dtype=self.DTYPE_SHORT)
+        mix_start_pos = -self._seconds_to_frames(self._current_head - chunk.time)
+        mix_end_pos = mix_start_pos + len(buf)
+        if mix_end_pos == 0:
+            mix_end_pos = None
+        self._buffer[mix_start_pos:mix_end_pos] = self._mix_frames(
+            self._buffer[mix_start_pos:mix_end_pos], buf)
 
     def add_buffer(self, buf):
-        self._extend_with_silence(exact=True)
-        buf_duration = self._frames_to_seconds(len(list(self.iter_frames(buf))))
-        self._buffer.extend(self.iter_frames(buf))
-        self._current_head += buf_duration
+        now = time.time()
+        if self._current_head > now:
+            fake_chunk = pymumble.soundqueue.SoundChunk(
+                buf,
+                0,
+                len(buf),
+                now,
+                None,
+                None,
+                timestamp=now,
+            )
+            self.add_chunk(fake_chunk)
+        else:
+            self._extend_with_silence(exact=True)
+            buf = numpy.frombuffer(buf, dtype=self.DTYPE_SHORT)
+            self._buffer.extend(buf)
+            self._current_head += self._frames_to_seconds(len(buf))
 
     def _extend_with_silence(self, silence_length=None, exact=False):
         if silence_length is None:
@@ -247,31 +285,32 @@ class MixingBuffer:
                 # self._current_head is in the future, don't need to come up to date
                 return
         if not exact:
-            silence_length = max(silence_length, self.MIN_SILENCE_EXTENSION)
-        self._buffer.extend([0] * self._seconds_to_frames(silence_length))
+            silence_length = max(min(silence_length, self._buffer_len), self.MIN_SILENCE_EXTENSION)
+        self._buffer.extend(numpy.zeros(self._seconds_to_frames(silence_length), dtype=self.DTYPE_SHORT))
         self._current_head += silence_length
 
     def _reset(self):
-        self._buffer.extend([0] * self._buffer.maxlen)
+        self._buffer = AssignableRingBuffer(self._seconds_to_frames(self._buffer_len), dtype=self.DTYPE_SHORT)
+        self._buffer.extend(numpy.zeros(self._buffer._capacity, dtype=self.DTYPE_SHORT))
         self._current_head = time.time()
 
     def get_last(self, seconds):
-        seconds = min(self._frames_to_seconds(self._buffer.maxlen - 1), seconds)
+        seconds = min(self._frames_to_seconds(len(self._buffer) - 1), seconds)
         frame_count = self._seconds_to_frames(seconds)
-        buf = b''.join(struct.pack(SAMPLE_FRAME_FORMAT, frame) for frame in self._buffer[-frame_count:])
+        buf = self._buffer[-frame_count:].tobytes()
         # round to PYMUMBLE_AUDIO_PER_PACKET
         return buf[len(buf) % SOUNDCHUNK_SIZE:]
 
     def get_all(self):
-        buf = b''.join(struct.pack(SAMPLE_FRAME_FORMAT, frame) for frame in self._buffer)
+        buf = self._buffer[:].tobytes()
         # round to PYMUMBLE_AUDIO_PER_PACKET
         return buf[len(buf) % SOUNDCHUNK_SIZE:]
 
     def _seconds_to_frames(self, seconds):
-        return int(round((seconds / PYMUMBLE_AUDIO_PER_PACKET) * (SOUNDCHUNK_SIZE / SAMPLE_FRAME_SIZE)))
+        return int(round(seconds * PYMUMBLE_SAMPLERATE))
 
     def _frames_to_seconds(self, frames):
-        return ((frames * SAMPLE_FRAME_SIZE) / SOUNDCHUNK_SIZE) * (PYMUMBLE_AUDIO_PER_PACKET)
+        return frames / PYMUMBLE_SAMPLERATE
 
 class MumbleControlCommand(Enum):
     EXIT = auto()

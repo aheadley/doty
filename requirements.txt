@@ -8,3 +8,5 @@ protobuf==3.6.1
 PyYAML==3.13
 google-cloud-texttospeech==0.4.0
 requests==2.21.0
+numpy==1.16.1
+numpy-ringbuffer==0.2.1
