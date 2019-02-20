@@ -33,7 +33,6 @@ import requests
 import yaml
 
 from bs4 import BeautifulSoup
-from google.cloud import speech as gcloud_speech
 from google.cloud import texttospeech as gcloud_texttospeech
 from numpy_ringbuffer import RingBuffer
 import pymumble_py3 as pymumble
@@ -53,6 +52,7 @@ from pymumble_py3.constants import (
 from pymumble_py3.errors import (
     UnknownChannelError,
 )
+from watson_developer_cloud import SpeechToTextV1 as watson_speech
 
 
 APP_NAME = 'doty'
@@ -568,24 +568,24 @@ def proc_transcriber(transcription_config, router_conn):
     keep_running = True
     log.debug('Transcribing starting up')
 
-    speech_client = gcloud_speech.SpeechClient.from_service_account_json(transcription_config['google_cloud_auth'])
-
+    speech_client = watson_speech(
+        iam_apikey=transcription_config['watson_api_key'],
+        url=transcription_config['watson_url'],
+    )
     @contexttimer.timer(logger=log, level=logging.DEBUG)
     def transcribe(buf, phrases=[]):
-        speech_content = gcloud_speech.types.RecognitionAudio(content=buf)
-        speech_config = gcloud_speech.types.RecognitionConfig(
-            encoding=gcloud_speech.enums.RecognitionConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=PYMUMBLE_SAMPLERATE,
-            language_code=transcription_config['language'],
-            speech_contexts=[gcloud_speech.types.SpeechContext(phrases=list(set(phrases \
-                + transcription_config['hint_phrases'])))],
+        resp = speech_client.recognize(
+            audio=io.BytesIO(buf),
+            content_type='audio/l16; rate={:d}; channels=1; endianness=little-endian'.format(PYMUMBLE_SAMPLERATE),
+            model=transcription_config['model'],
+            keywords=list(set(phrases + transcription_config['hint_phrases'])),
+            keywords_threshold=0.8,
         )
-        response = speech_client.recognize(speech_config, speech_content)
-        for result in response.results:
-            for alternative in result.alternatives:
+        for result in resp.get_result()['results']:
+            for alt in result['alternatives']:
                 return {
-                    'transcript': alternative.transcript,
-                    'confidence': alternative.confidence,
+                    'transcript': alt['transcript'].strip(),
+                    'confidence': alt['confidence'],
                 }
         return None
 

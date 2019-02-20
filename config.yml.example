@@ -41,9 +41,10 @@ router:
   enable_commands: true
 
 transcriber:
-  google_cloud_auth: 'path/to/creds.json'
-  # https://cloud.google.com/speech-to-text/docs/languages
-  language: en-US
+  watson_api_key: 'CHANGE ME'
+  watson_url: 'https://stream.watsonplatform.net/speech-to-text/api'
+  # https://cloud.ibm.com/docs/services/speech-to-text/models.html
+  model: en-US_BroadbandModel
   # an optional, extra vocabulary to help Google recognize spoken words
   hint_phrases: []
 
