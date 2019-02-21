@@ -988,7 +988,8 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                         ),
                 })
                 cmd_msg = cmd_data['result']['transcript'].strip()
-                if cmd_msg.lower().startswith(router_config['activation_word'].lower()):
+                if any(cmd_msg.lower().startswith(actword.lower() \
+                        for actword in router_config['activation_words'])):
                     log.debug('Found possible voice command: %s', cmd_msg)
             else:
                 log.warning('Unrecognized command from transcriber: %r', cmd_data)
@@ -1034,7 +1035,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                         'actor': user['session'],
                         'buffer': audio_buffer,
                         'phrases': [u['name'] for u in MMBL_USERS.values()] \
-                            + [router_config['activation_word']] \
+                            + router_config['activation_words'] \
                             + IRC_USERS,
                         'txid': txid,
                     })
@@ -1052,7 +1053,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                         trans_conn.send({'cmd': TranscriberControlCommand.TRANSCRIBE_MESSAGE,
                             'actor': user['session'],
                             'buffer': audio_buffer,
-                            'phrases': [u['name'] for u in MMBL_USERS.values()] + [router_config['activation_word']],
+                            'phrases': [u['name'] for u in MMBL_USERS.values()] + router_config['activation_words'],
                             'txid': txid,
                         })
                         data['buffer'].clear()

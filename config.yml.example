@@ -1,5 +1,9 @@
 ---
 
+# In addition to being an example config file, this is file is loaded to set
+# default values for any keys missing from the user config, so the user only
+# needs to specify values that they are overriding
+
 main:
   # initial time to wait to restart a crashed process
   restart_wait: 3
@@ -23,21 +27,24 @@ irc:
   ssl_verify: false
 
 router:
-  # the word or phrase to signal a voice command, think "ok google" or "alexa"
-  activation_word: doty
+  # the words or phrases to signal a voice command, think "ok google" or "alexa"
+  #   NOTE: not yet used, but will be for voice-activated commands
+  activation_words:
+    - doty
+    - dodie
   # how long to wait after the last audio packet recieved from a user before
   # sending the audio off for transcription
   wait_time: 1.5
-  # the minimum length of an audio clip to bother transcribing, note that google
-  # bills in 15s increments: https://cloud.google.com/speech-to-text/pricing
+  # the minimum length of an audio clip to bother transcribing
   min_buffer_len: 0.5
-  # length of time to store a buffer of the mixed audio stream
+  # length of time to store a buffer of the mixed audio stream for !replay and !clip
   mixed_buffer_len: 120
   # username/nicks to ignore in IRC and Mumble, applies to both text and audio
   ignore: []
   # This will be spoken at bot startup, set to false or '' (empty string) to disable
   # https://www.youtube.com/watch?v=QrWAdq8e_uA
   startup_message: Reactor Online. Sensors Online. Weapons Online. All Systems Nominal.
+  # set this to false to make the bot ignore any !commands
   enable_commands: true
 
 transcriber:
@@ -45,7 +52,7 @@ transcriber:
   watson_url: 'https://stream.watsonplatform.net/speech-to-text/api'
   # https://cloud.ibm.com/docs/services/speech-to-text/models.html
   model: en-US_BroadbandModel
-  # an optional, extra vocabulary to help Google recognize spoken words
+  # an optional, extra vocabulary to help recognize words
   hint_phrases: []
 
 speaker:

@@ -5,22 +5,19 @@ Doty is (primarily) a Mumble <> IRC bridge/transcription bot. It will transcribe
 in a Mumble channel and output it to IRC, while copying or speaking any IRC
 messages into Mumble.
 
-The transcription uses Google Cloud Speech-to-Text and the quality is... ok. Google's
-transcription does not seem to be geared toward casual conversation so it can
+The transcription uses [IBM Watson Speech-to-Text](https://www.ibm.com/watson/services/speech-to-text/)
+and the quality is... ok. Automated transcription does not seem to be geared 
+toward casual conversation so it can
 make a lot of mistakes, but generally you can reasonably follow a conversation in
 Mumble just from the transcription.
 
 ## Pre-requisites
 
-You will need a [Google Cloud](https://cloud.google.com/) account, along with
-a [JSON blob of credentials](https://cloud.google.com/iam/docs/creating-managing-service-account-keys) authorized to use the transcription and text-to-speech
-services.
-
-Note that because of the way Google's billing for the transcription works
-(audio less than 15 seconds is rounded up to 15 seconds) it can be very expensive to
-run Doty. It is recommended to increase `router.min_buffer_len` in the config to
-somewhere in the 10-15 second range to be more cost effective, though this comes
-at the cost of responsiveness in IRC.
+  - An [IBM Watson Cloud](https://www.ibm.com/watson/developercloud/) account
+    with an IAM API key authorized to use the Speech-to-Text service.
+  - A [Google Cloud](https://cloud.google.com/) account with a
+    [JSON blob of credentials](https://cloud.google.com/iam/docs/creating-managing-service-account-keys)
+    to use the Text-to-Speech service.
 
 ## Installation
 
