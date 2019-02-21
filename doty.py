@@ -193,17 +193,19 @@ class AssignableRingBuffer(RingBuffer):
     def __setitem__(self, idx, value):
         if isinstance(idx, slice):
             idx = self._normalize_slice(idx)
-            assert (idx.stop - idx.start) == len(value), 'len(slice) != len(value)'
-            if self._left_index+idx.stop < self._capacity:
+            assert (idx.stop - idx.start) == len(value), 'len(slice) != len(value): idx.start={} idx.stop={} diff={} len(value)={}'.format(idx.start, idx.stop, idx.stop - idx.start, len(value))
+            assert len(value) < self._capacity, 'slice too large: len(value)={}'.format(len(value))
+
+            # first chunk
+            sl_start = (self._left_index + idx.start) % self._capacity
+            sl_end = (self._left_index + idx.stop) % self._capacity
+            if sl_start < sl_end:
                 # simple case, doesn't wrap
-                self._arr[self._left_index+idx.start:self._left_index+idx.stop] = value
+                self._arr[sl_start:sl_end] = value
             else:
-                # array wraps around
-                sl_start = (self._left_index + idx.start) % self._capacity
-                sl1 = value[:(self._capacity-sl_start) % len(value)]
-                self._arr[sl_start:sl_start+len(sl1)] = sl1
-                sl2 = value[len(sl1):]
-                self._arr[sl_start+len(sl1):sl_start+len(sl1)+len(sl2)] = sl2
+                sl1 = value[:len(self._arr[sl_start:])]
+                self._arr[sl_start:] = sl1
+                self._arr[:sl_end] = value[len(sl1):]
         elif isinstance(idx, int):
             if idx >= 0:
                 self._arr[self._left_index+idx % self._capacity] = value
@@ -254,8 +256,14 @@ class MixingBuffer:
         mix_end_pos = mix_start_pos + len(buf)
         if mix_end_pos == 0:
             mix_end_pos = None
-        self._buffer[mix_start_pos:mix_end_pos] = self._mix_frames(
-            self._buffer[mix_start_pos:mix_end_pos], buf)
+        try:
+            self._buffer[mix_start_pos:mix_end_pos] = self._mix_frames(
+                self._buffer[mix_start_pos:mix_end_pos], buf)
+        except Exception as err:
+            log.warning('Failed to mix audio: [%d:%d]', mix_start_pos, mix_end_pos)
+            log.debug('Mix stats: _buffer._left_index=%d _buffer._right_index=%d len(buf)=%d',
+                self._buffer._left_index, self._buffer._right_index, len(buf))
+            log.exception(err)
 
     def add_buffer(self, buf):
         now = time.time()
@@ -581,12 +589,22 @@ def proc_transcriber(transcription_config, router_conn):
             keywords=list(set(phrases + transcription_config['hint_phrases'])),
             keywords_threshold=0.8,
         )
-        for result in resp.get_result()['results']:
-            for alt in result['alternatives']:
-                return {
-                    'transcript': alt['transcript'].strip(),
-                    'confidence': alt['confidence'],
-                }
+        try:
+            results = resp.get_result()['results']
+        except KeyError as err:
+            log.exception(err)
+            return None
+
+        value = '. '.join(alt['transcript'] for alt in result['alternatives'] for result in results).strip()
+
+        if value:
+            conf = [alt['confidence'] \
+                for alt in result['alternatives'] \
+                    for result in results]
+            return {
+                'transcript': value.replace('%HESITATION', '...'),
+                'confidence': sum(conf) / len(conf),
+            }
         return None
 
     log.info('Transcriber running')
