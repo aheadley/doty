@@ -411,7 +411,11 @@ def proc_irc(irc_config, router_conn):
         else:
             log.warning('Unrecognized event type: %s', event.type)
             return
-        router_conn.send(cmd_data)
+        if cmd_data['source'] == irc_config['username']:
+            # it's something we sent or triggered, ignore it
+            log.debug('Ignoring event from ourself: %r', cmd_data)
+        else:
+            router_conn.send(cmd_data)
     for ev_type in ['pubmsg', 'privmsg', 'action']:
         client.add_global_handler(ev_type, handle_irc_message)
 
@@ -427,7 +431,11 @@ def proc_irc(irc_config, router_conn):
         else:
             log.warning('Unrecognized event type: %s', event.type)
             return
-        router_conn.send(cmd_data)
+        if cmd_data['source'] == irc_config['username']:
+            # it's something we sent or triggered, ignore it
+            log.debug('Ignoring event from ourself: %r', cmd_data)
+        else:
+            router_conn.send(cmd_data)
     for ev_type in ['join', 'kick', 'part', 'quit', 'nick']:
         client.add_global_handler(ev_type, handle_membership_change)
 
