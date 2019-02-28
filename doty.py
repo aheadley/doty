@@ -595,12 +595,13 @@ def proc_transcriber(transcription_config, router_conn):
             log.exception(err)
             return None
 
-        value = '. '.join(alt['transcript'] for alt in result['alternatives'] for result in results).strip()
+        value = '. '.join(alt['transcript'] for result in results for alt in result['alternatives']).strip()
 
         if value:
             conf = [alt['confidence'] \
-                for alt in result['alternatives'] \
-                    for result in results]
+                for result in results
+                    for alt in result['alternatives'] \
+                    ]
             return {
                 'transcript': value.replace('%HESITATION', '...'),
                 'confidence': sum(conf) / len(conf),
@@ -988,8 +989,8 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                         ),
                 })
                 cmd_msg = cmd_data['result']['transcript'].strip()
-                if any(cmd_msg.lower().startswith(actword.lower() \
-                        for actword in router_config['activation_words'])):
+                if any(cmd_msg.lower().startswith(actword.lower()) \
+                        for actword in router_config['activation_words']):
                     log.debug('Found possible voice command: %s', cmd_msg)
             else:
                 log.warning('Unrecognized command from transcriber: %r', cmd_data)
