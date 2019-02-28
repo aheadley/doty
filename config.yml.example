@@ -25,6 +25,9 @@ irc:
   channel: '#example'
   ssl: false
   ssl_verify: false
+  # Allow connections via IPv6, does not require the connection to be via IPv6
+  #   only disable this is the IPv6 stack is completely disabled on the host
+  allow_ipv6: true
 
 router:
   # the words or phrases to signal a voice command, think "ok google" or "alexa"

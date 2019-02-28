@@ -386,10 +386,12 @@ def proc_irc(irc_config, router_conn):
         ssl_ctx = ssl.create_default_context()
         if not irc_config['ssl_verify']:
             ssl_ctx.verify_mode = ssl.CERT_NONE
-        conn_factory = irc.connection.Factory(wrapper=lambda s:
-            ssl_ctx.wrap_socket(s, server_hostname=irc_config['server']))
+        conn_factory = irc.connection.Factory(
+            wrapper=lambda s: ssl_ctx.wrap_socket(s, server_hostname=irc_config['server']),
+            ipv6=irc_config['allow_ipv6'],
+        )
     else:
-        conn_factory = irc.connection.Factory()
+        conn_factory = irc.connection.Factory(ipv6=irc_config['allow_ipv6'])
 
     e2d = lambda ev: {
         'type': ev.type,
