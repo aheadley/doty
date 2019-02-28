@@ -595,7 +595,9 @@ def proc_transcriber(transcription_config, router_conn):
             log.exception(err)
             return None
 
-        value = '. '.join(alt['transcript'] for result in results for alt in result['alternatives']).strip()
+        value = '. '.join(alt['transcript'].replace('%HESITATION', '...').strip() \
+            for result in results \
+                for alt in result['alternatives']).strip()
 
         if value:
             conf = [alt['confidence'] \
@@ -603,7 +605,7 @@ def proc_transcriber(transcription_config, router_conn):
                     for alt in result['alternatives'] \
                     ]
             return {
-                'transcript': value.replace('%HESITATION', '...'),
+                'transcript': value,
                 'confidence': sum(conf) / len(conf),
             }
         return None
