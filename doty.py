@@ -598,6 +598,7 @@ def proc_transcriber(transcription_config, router_conn):
             model=transcription_config['model'],
             keywords=list(set(phrases + transcription_config['hint_phrases'])),
             keywords_threshold=0.8,
+            profanity_filter=False,
         )
         try:
             results = resp.get_result()['results']
