@@ -57,6 +57,7 @@ transcriber:
   model: en-US_BroadbandModel
   # an optional, extra vocabulary to help recognize words
   hint_phrases: []
+  save_to: null
 
 speaker:
   google_cloud_auth: 'path/to/creds.json'

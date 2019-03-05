@@ -67,6 +67,7 @@ WAV_HEADER_LEN = 44
 MAX_TRANSCRIPTION_TIME = 60.0
 BASE_CONFIG_FILENAME = 'config.yml.example'
 SOUNDCHUNK_SIZE = 1920
+AUDIO_CHANNELS = 1
 SAMPLE_FRAME_FORMAT = '<h'
 SAMPLE_FRAME_SIZE = struct.calcsize(SAMPLE_FRAME_FORMAT)
 COMMAND_HELP_MESSAGE = """
@@ -123,7 +124,7 @@ def denote_callback(clbk_type):
         return inner_wrapper
     return outer_wrapper
 
-generate_uuid = lambda: str(uuid.uuid1())
+generate_uuid = lambda: str(uuid.uuid4())
 sha1sum = lambda data: hashlib.sha1(data if type(data) in (bytes, bytearray) else data.encode('utf-8')).hexdigest()
 
 def denotify_username(username):
@@ -639,6 +640,19 @@ def proc_transcriber(transcription_config, router_conn):
                         'result': result,
                         'txid': cmd_data['txid'],
                     })
+                    if transcription_config['save_to']:
+                        base_path = os.path.join(transcription_config['save_to'], cmd_data['username'])
+                        if not os.path.exists(base_path):
+                            os.makedirs(base_path, mode=0o755)
+                        wav_fname = cmd_data['txid'] + '.wav'
+                        map_fname = 'metadata.csv'
+                        with wave.open(os.path.join(base_path, wav_fname), 'wb') as wav_file:
+                            wav_file.setnchannels(AUDIO_CHANNELS)
+                            wav_file.setsampwidth(2)
+                            wav_file.setframerate(PYMUMBLE_SAMPLERATE)
+                            wav_file.writeframes(cmd_data['buffer'])
+                        with open(os.path.join(base_path, map_fname), 'a') as map_file:
+                            map_file.write('{},{}\n'.format(wav_fname, result['transcript']))
                 else:
                     log.debug('No transcription result for: txid=%s, actor=%d',
                         cmd_data['txid'], cmd_data['actor'])
@@ -1047,6 +1061,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                     log.debug('Queueing partial buffer: txid=%s len=%d bytes dur=%1.2fs', txid, len(audio_buffer), buf_dur)
                     trans_conn.send({'cmd': TranscriberControlCommand.TRANSCRIBE_MESSAGE,
                         'actor': user['session'],
+                        'username': user['name'],
                         'buffer': audio_buffer,
                         'phrases': [u['name'] for u in MMBL_USERS.values()] \
                             + router_config['activation_words'] \
@@ -1066,6 +1081,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                         log.debug('Queueing buffer: txid=%s len=%d bytes dur=%1.2fs', txid, len(audio_buffer), buf_dur)
                         trans_conn.send({'cmd': TranscriberControlCommand.TRANSCRIBE_MESSAGE,
                             'actor': user['session'],
+                            'username': user['name'],
                             'buffer': audio_buffer,
                             'phrases': [u['name'] for u in MMBL_USERS.values()] + router_config['activation_words'],
                             'txid': txid,
