@@ -642,11 +642,11 @@ def proc_transcriber(transcription_config, router_conn):
                     })
                     if transcription_config['save_to']:
                         base_path = os.path.join(transcription_config['save_to'], cmd_data['username'])
-                        if not os.path.exists(base_path):
-                            os.makedirs(base_path, mode=0o755)
+                        if not os.path.exists(os.path.join(base_path, 'wavs')):
+                            os.makedirs(os.path.join(base_path, 'wavs'), mode=0o755)
                         wav_fname = cmd_data['txid'] + '.wav'
                         map_fname = 'metadata.csv'
-                        with wave.open(os.path.join(base_path, wav_fname), 'wb') as wav_file:
+                        with wave.open(os.path.join(base_path, 'wavs', wav_fname), 'wb') as wav_file:
                             wav_file.setnchannels(AUDIO_CHANNELS)
                             wav_file.setsampwidth(2)
                             wav_file.setframerate(PYMUMBLE_SAMPLERATE)
