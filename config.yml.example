@@ -57,7 +57,10 @@ transcriber:
   model: en-US_BroadbandModel
   # an optional, extra vocabulary to help recognize words
   hint_phrases: []
+  # path to save audio data to
   save_to: null
+  # only save the audio clips, don't transcribe
+  save_only: false
 
 speaker:
   google_cloud_auth: 'path/to/creds.json'

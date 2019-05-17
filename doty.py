@@ -630,16 +630,20 @@ def proc_transcriber(transcription_config, router_conn):
                 log.debug('Recieved EXIT command from router')
                 keep_running = False
             elif cmd_data['cmd'] == TranscriberControlCommand.TRANSCRIBE_MESSAGE:
-                result = transcribe(cmd_data['buffer'], cmd_data['phrases'])
+                if transcription_config['save_only']:
+                    result = {'transcript': 'NO_DATA', 'confidence': 0.0}
+                else:
+                    result = transcribe(cmd_data['buffer'], cmd_data['phrases'])
                 if result:
-                    log.debug('Transcription result: txid=%s actor=%d result=%r',
-                        cmd_data['txid'], cmd_data['actor'], result)
-                    router_conn.send({
-                        'cmd': TranscriberControlCommand.TRANSCRIBE_MESSAGE_RESPONSE,
-                        'actor': cmd_data['actor'],
-                        'result': result,
-                        'txid': cmd_data['txid'],
-                    })
+                    if not transcription_config['save_only']:
+                        log.debug('Transcription result: txid=%s actor=%d result=%r',
+                            cmd_data['txid'], cmd_data['actor'], result)
+                        router_conn.send({
+                            'cmd': TranscriberControlCommand.TRANSCRIBE_MESSAGE_RESPONSE,
+                            'actor': cmd_data['actor'],
+                            'result': result,
+                            'txid': cmd_data['txid'],
+                        })
                     if transcription_config['save_to']:
                         base_path = os.path.join(transcription_config['save_to'], cmd_data['username'])
                         if not os.path.exists(os.path.join(base_path, 'wavs')):
