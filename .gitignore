@@ -121,3 +121,7 @@ dmypy.json
 # Config files
 *.yml
 *.yaml
+
+# STT model/scorer
+*.pbmm
+*.scorer

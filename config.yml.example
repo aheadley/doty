@@ -26,7 +26,7 @@ irc:
   ssl: false
   ssl_verify: false
   # Allow connections via IPv6, does not require the connection to be via IPv6
-  #   only disable this is the IPv6 stack is completely disabled on the host
+  #   only disable this if the IPv6 stack is completely disabled on the host
   allow_ipv6: true
 
 router:
@@ -51,10 +51,12 @@ router:
   enable_commands: true
 
 transcriber:
-  watson_api_key: 'CHANGE ME'
-  watson_url: 'https://stream.watsonplatform.net/speech-to-text/api'
-  # https://cloud.ibm.com/docs/services/speech-to-text/models.html
-  model: en-US_BroadbandModel
+  # https://stt.readthedocs.io/en/latest/DEPLOYMENT.html#download-models
+  model_path: 'path/to/model.pbmm'
+  scorer_path: 'path/to/scorer.scorer'
+  # https://github.com/tuxu/python-samplerate/blob/master/samplerate/converters.py#L15
+  # should be one of: sinc_best, sinc_medium, sinc_fastest, zero_order_hold, linear
+  resample_algo: sinc_best
   # an optional, extra vocabulary to help recognize words
   hint_phrases: []
   # path to save audio data to

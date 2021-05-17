@@ -30,6 +30,8 @@ import irc.client
 import irc.connection
 import numpy
 import requests
+import samplerate
+import stt
 import yaml
 
 from bs4 import BeautifulSoup
@@ -52,8 +54,6 @@ from pymumble_py3.constants import (
 from pymumble_py3.errors import (
     UnknownChannelError,
 )
-from watson_developer_cloud import SpeechToTextV1 as watson_speech
-
 
 APP_NAME = 'doty'
 LOG_LEVEL = logging.INFO
@@ -587,39 +587,38 @@ def proc_transcriber(transcription_config, router_conn):
     keep_running = True
     log.debug('Transcribing starting up')
 
-    speech_client = watson_speech(
-        iam_apikey=transcription_config['watson_api_key'],
-        url=transcription_config['watson_url'],
-    )
+    try:
+        model = stt.Model(transcription_config['model_path'])
+        model.enableExternalScorer(transcription_config['scorer_path'])
+    except Exception as err:
+        keep_running = False
+        log.error('Failed to load transcriber model')
+        log.exception(err)
+
+    @contexttimer.timer(logger=log, level=logging.DEBUG)
+    def resample(buf, src_sr, dest_sr):
+        sr_ratio = float(dest_sr) / src_sr
+        return samplerate.resample(buf, sr_ratio, converter_type=transcription_config['resample_algo'])
+
     @contexttimer.timer(logger=log, level=logging.DEBUG)
     def transcribe(buf, phrases=[]):
-        resp = speech_client.recognize(
-            audio=io.BytesIO(buf),
-            content_type='audio/l16; rate={:d}; channels=1; endianness=little-endian'.format(PYMUMBLE_SAMPLERATE),
-            model=transcription_config['model'],
-            keywords=list(set(phrases + transcription_config['hint_phrases'])),
-            keywords_threshold=0.8,
-            profanity_filter=False,
-        )
+        audio_data = numpy.frombuffer(buf, numpy.int16)
+        model_samplerate = model.sampleRate()
+        if model_samplerate != PYMUMBLE_SAMPLERATE:
+            audio_data = resample(audio_data, PYMUMBLE_SAMPLERATE, model_samplerate)
+
         try:
-            results = resp.get_result()['results']
-        except KeyError as err:
+            result = model.sttWithMetadata(audio_data)
+        except Exception as err:
             log.exception(err)
-            return None
 
-        value = '. '.join(alt['transcript'].replace('%HESITATION', '...').strip() \
-            for result in results \
-                for alt in result['alternatives']).strip()
-
-        if value:
-            conf = [alt['confidence'] \
-                for result in results
-                    for alt in result['alternatives'] \
-                    ]
-            return {
-                'transcript': value,
-                'confidence': sum(conf) / len(conf),
-            }
+        for transcript in result.transcripts():
+            value = ''.join(t.text() for t in transcript.tokens()).strip()
+            if value:
+                return {
+                    'transcript': value,
+                    'confidence': transcript.confidence(),
+                }
         return None
 
     log.info('Transcriber running')
