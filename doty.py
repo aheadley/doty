@@ -598,11 +598,12 @@ def proc_transcriber(transcription_config, router_conn):
     @contexttimer.timer(logger=log, level=logging.DEBUG)
     def resample(buf, src_sr, dest_sr):
         sr_ratio = float(dest_sr) / src_sr
-        return samplerate.resample(buf, sr_ratio, converter_type=transcription_config['resample_algo'])
+        return samplerate.resample(buf, sr_ratio,
+            converter_type=transcription_config['resample_algo']).astype(numpy.int16)
 
     @contexttimer.timer(logger=log, level=logging.DEBUG)
     def transcribe(buf, phrases=[]):
-        audio_data = numpy.frombuffer(buf, numpy.int16)
+        audio_data = numpy.frombuffer(buf, dtype=numpy.int16)
         model_samplerate = model.sampleRate()
         if model_samplerate != PYMUMBLE_SAMPLERATE:
             audio_data = resample(audio_data, PYMUMBLE_SAMPLERATE, model_samplerate)
@@ -611,14 +612,14 @@ def proc_transcriber(transcription_config, router_conn):
             result = model.sttWithMetadata(audio_data)
         except Exception as err:
             log.exception(err)
-
-        for transcript in result.transcripts():
-            value = ''.join(t.text() for t in transcript.tokens()).strip()
-            if value:
-                return {
-                    'transcript': value,
-                    'confidence': transcript.confidence(),
-                }
+        else:
+            for transcript in result.transcripts:
+                value = ''.join(t.text for t in transcript.tokens).strip()
+                if value:
+                    return {
+                        'transcript': value,
+                        'confidence': transcript.confidence,
+                    }
         return None
 
     log.info('Transcriber running')
