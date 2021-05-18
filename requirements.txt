@@ -8,4 +8,5 @@ pymumble==1.6.1
 PyYAML==5.4.1
 requests==2.25.1
 samplerate==0.1.0
+setproctitle==1.2.2
 stt==0.10.0a6

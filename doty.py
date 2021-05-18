@@ -31,6 +31,7 @@ import irc.connection
 import numpy
 import requests
 import samplerate
+import setproctitle
 import stt
 import yaml
 
@@ -376,6 +377,7 @@ class RouterControlCommand(Enum):
 
 @multiprocessify
 def proc_irc(irc_config, router_conn):
+    setproctitle.setproctitle('doty: irc worker')
     log = getWorkerLogger('irc', level=LOG_LEVEL)
     keep_running = True
 
@@ -457,14 +459,14 @@ def proc_irc(irc_config, router_conn):
                 server.disconnect()
                 keep_running = False
             elif cmd_data['cmd'] == IrcControlCommand.SEND_CHANNEL_TEXT_MSG:
-                log.info('Sending message: %s', cmd_data['msg'])
+                log.info('Sending message: %s', cmd_data['msg'].replace(ZW_SPACE, ''))
                 server.privmsg(irc_config['channel'], cmd_data['msg'])
             elif cmd_data['cmd'] == IrcControlCommand.SEND_USER_TEXT_MSG:
                 log.info('Sending message to user: %s -> %s',
                     cmd_data['user'], cmd_data['msg'])
                 server.privmsg(cmd_data['user'], cmd_data['msg'])
             elif cmd_data['cmd'] == IrcControlCommand.SEND_CHANNEL_ACTION:
-                log.info('Sending action: %s', cmd_data['msg'])
+                log.info('Sending action: %s', cmd_data['msg'].replace(ZW_SPACE, ''))
                 server.action(irc_config['channel'], cmd_data['msg'])
             else:
                 log.warning('Unrecognized command: %r', cmd_data)
@@ -472,6 +474,7 @@ def proc_irc(irc_config, router_conn):
 
 @multiprocessify
 def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
+    setproctitle.setproctitle('doty: mumble worker')
     log = getWorkerLogger('mmbl', level=LOG_LEVEL)
     keep_running = True
     clbk_lock = threading.Lock()
@@ -583,6 +586,7 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
 
 @multiprocessify
 def proc_transcriber(transcription_config, router_conn):
+    setproctitle.setproctitle('doty: transcriber worker')
     log = getWorkerLogger('transcriber', level=LOG_LEVEL)
     keep_running = True
     log.debug('Transcribing starting up')
@@ -666,18 +670,19 @@ def proc_transcriber(transcription_config, router_conn):
 
 @multiprocessify
 def proc_speaker(speaker_config, router_conn):
+    setproctitle.setproctitle('doty: speaker worker')
     log = getWorkerLogger('speaker', level=LOG_LEVEL)
     keep_running = True
     log.debug('Speaker starting up')
 
     tts_client = gcloud_texttospeech.TextToSpeechClient.from_service_account_json(speaker_config['google_cloud_auth'])
-    tts_voice = gcloud_texttospeech.types.VoiceSelectionParams(
+    tts_voice = gcloud_texttospeech.VoiceSelectionParams(
         language_code=speaker_config['language'],
         name=speaker_config['voice'],
 
     )
-    tts_config = gcloud_texttospeech.types.AudioConfig(
-        audio_encoding=gcloud_texttospeech.enums.AudioEncoding.LINEAR16,
+    tts_config = gcloud_texttospeech.AudioConfig(
+        audio_encoding=gcloud_texttospeech.AudioEncoding.LINEAR16,
         sample_rate_hertz=PYMUMBLE_SAMPLERATE,
         effects_profile_id=speaker_config['effect_profiles'],
         speaking_rate=speaker_config['speed'],
@@ -687,8 +692,8 @@ def proc_speaker(speaker_config, router_conn):
 
     @contexttimer.timer(logger=log, level=logging.DEBUG)
     def speak(text):
-        text_input = gcloud_texttospeech.types.SynthesisInput(text=text)
-        response = tts_client.synthesize_speech(text_input, tts_voice, tts_config)
+        text_input = gcloud_texttospeech.SynthesisInput(text=text)
+        response = tts_client.synthesize_speech(input=text_input, voice=tts_voice, audio_config=tts_config)
         return response.audio_content[WAV_HEADER_LEN:]
 
     log.info('Speaker running')
@@ -721,6 +726,7 @@ def proc_speaker(speaker_config, router_conn):
 
 @multiprocessify
 def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, master_conn):
+    setproctitle.setproctitle('doty: router worker')
     log = getWorkerLogger('router', level=LOG_LEVEL)
     keep_running = True
     log.debug('Router starting up')
@@ -1112,6 +1118,7 @@ def main(args, **kwargs):
     log.debug('Loading user config: %s', args.config)
     with open(args.config) as config_handle:
         config = deep_merge_dict(config, yaml.safe_load(config_handle))
+    setproctitle.setproctitle('doty: master')
 
     mmbl_conn = QueuePipe()
     irc_conn = QueuePipe()
