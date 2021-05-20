@@ -2,6 +2,7 @@ beautifulsoup4==4.9.3
 contexttimer==0.3.3
 google-cloud-texttospeech==2.3.0
 irc==19.0.1
+jsonschema==3.2.0
 numpy==1.20.3
 numpy-ringbuffer==0.2.1
 pymumble==1.6.1
@@ -10,3 +11,4 @@ requests==2.25.1
 samplerate==0.1.0
 setproctitle==1.2.2
 stt==0.10.0a6
+watson-developer-cloud==2.10.1

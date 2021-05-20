@@ -1,0 +1,238 @@
+---
+
+type: object
+properties:
+  main:
+    properties:
+      restart_wait:
+        type: number
+        minimum: 1.0
+      restart_factor:
+        type: number
+        minimum: 1.0
+      restart_max:
+        type: number
+    required:
+      - restart_wait
+      - restart_factor
+      - restart_max
+    additionalProperties: false
+
+  mumble:
+    properties:
+      server:
+        type: string
+      port:
+        type: integer
+        minimum: 1024
+        maximum: 65535
+      username:
+        type: string
+      password:
+        type: string
+    required:
+      - server
+      - port
+      - username
+      - password
+    additionalProperties: false
+
+  irc:
+    properties:
+      server:
+        type: string
+      port:
+        type: integer
+        minimum: 1024
+        maximum: 65535
+      username:
+        type: string
+      channel:
+        type: string
+      ssl:
+        type: boolean
+      ssl_verify:
+        type: boolean
+      allow_ipv6:
+        type: boolean
+    required:
+      - server
+      - port
+      - username
+      - channel
+      - ssl
+      - ssl_verify
+      - allow_ipv6
+    additionalProperties: false
+
+  router:
+    properties:
+      activation_words:
+        type: array
+        items:
+          type: string
+      wait_time:
+        type: number
+        minimum: 0.0
+      min_buffer_len:
+        type: number
+        minimum: 0.0
+      mixed_buffer_len:
+        type: integer
+        minimum: 10
+      ignore:
+        type: array
+        items:
+          type: string
+      startup_message:
+        type:
+          - string
+          - "null"
+      enable_commands:
+        type: boolean
+    required:
+      - activation_words
+      - wait_time
+      - min_buffer_len
+      - mixed_buffer_len
+      - ignore
+      - startup_message
+      - enable_commands
+    additionalProperties: false
+
+  transcriber:
+    properties:
+      engine:
+        type: string
+        enum:
+          - coqai-stt
+          - ibm-watson
+      engine_params:
+        type: object
+      hint_phrases:
+        type: array
+        items:
+          type: string
+      save_to:
+        type:
+          - string
+          - "null"
+      save_only:
+        type: boolean
+    allOf:
+      - if:
+          properties:
+            engine:
+              const: coqai-stt
+        then:
+          properties:
+            engine_params:
+              type: object
+              properties:
+                model_path:
+                  type: string
+                scorer_path:
+                  type: string
+                resample_method:
+                  type: string
+                  enum:
+                    - sinc_best
+                    - sinc_medium
+                    - sinc_fastest
+                    - zero_order_hold
+                    - linear
+              required:
+                - model_path
+                - scorer_path
+                - resample_method
+              additionalProperties: false
+      - if:
+          properties:
+            engine:
+              const: ibm-watson
+        then:
+          properties:
+            engine_params:
+              type: object
+              properties:
+                api_key:
+                  type: string
+                service_url:
+                  type: string
+                model:
+                  type: string
+              required:
+                - api_key
+                - service_url
+                - model
+              additionalProperties: false
+    required:
+      - engine
+      - engine_params
+      - hint_phrases
+      - save_to
+      - save_only
+    additionalProperties: false
+
+  speaker:
+    properties:
+      engine:
+        type: string
+        enum:
+          - gcloud-tts
+      engine_params:
+        type: object
+    allOf:
+      - if:
+          properties:
+            engine:
+              const: gcloud-tts
+        then:
+          properties:
+            engine_params:
+              type: object
+              properties:
+                credentials_path:
+                  type: string
+                language:
+                  type: string
+                voice:
+                  type: string
+                speed:
+                  type: number
+                  minimum: 0.25
+                  maximum: 4.0
+                pitch:
+                  type: number
+                  minimum: -20.0
+                  maximum: 20.0
+                volume:
+                  type: number
+                  minimum: -96.0
+                  maximum: 16.0
+                effect_profiles:
+                  type: array
+                  items:
+                    type: string
+              required:
+                - credentials_path
+                - language
+                - voice
+                - speed
+                - pitch
+                - volume
+                - effect_profiles
+              additionalProperties: false
+    required:
+      - engine
+      - engine_params
+    additionalProperties: false
+
+required:
+  - main
+  - mumble
+  - irc
+  - router
+  - transcriber
+  - speaker
+additionalProperties: false

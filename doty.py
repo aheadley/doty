@@ -28,11 +28,11 @@ from enum import (
 import contexttimer
 import irc.client
 import irc.connection
+import jsonschema
 import numpy
 import requests
 import samplerate
 import setproctitle
-import stt
 import yaml
 
 from bs4 import BeautifulSoup
@@ -55,6 +55,8 @@ from pymumble_py3.constants import (
 from pymumble_py3.errors import (
     UnknownChannelError,
 )
+import stt as coqai_speechtotext
+from watson_developer_cloud import SpeechToTextV1 as watson_speechtotext
 
 APP_NAME = 'doty'
 LOG_LEVEL = logging.INFO
@@ -67,6 +69,7 @@ WAV_HEADER_LEN = 44
 # https://cloud.google.com/speech-to-text/quotas
 MAX_TRANSCRIPTION_TIME = 60.0
 BASE_CONFIG_FILENAME = 'config.yml.example'
+SCHEMA_FILENAME = 'config.schema'
 SOUNDCHUNK_SIZE = 1920
 AUDIO_CHANNELS = 1
 SAMPLE_FRAME_FORMAT = '<h'
@@ -584,6 +587,78 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
             keep_running = False
     log.debug('Mumble process exiting')
 
+class CoqaiSTTEngine:
+    def __init__(self, engine_params, logger):
+        self._log = logger
+        self._model = coqai_speechtotext.Model(engine_params['model_path'])
+        self._model.enableExternalScorer(engine_params['scorer_path'])
+        self._resample_method = engine_params['resample_method']
+
+    def _resample(self, buf, src_sr, dest_sr):
+        sr_ratio = float(dest_sr) / src_sr
+        return samplerate.resample(buf, sr_ratio,
+            converter_type=self._resample_method).astype(numpy.int16)
+
+    def transcribe(self, buf, phrases=[]):
+        audio_data = numpy.frombuffer(buf, dtype=numpy.int16)
+        model_samplerate = self._model.sampleRate()
+        if model_samplerate != PYMUMBLE_SAMPLERATE:
+            audio_data = self._resample(audio_data, PYMUMBLE_SAMPLERATE, model_samplerate)
+
+        try:
+            result = self._model.sttWithMetadata(audio_data)
+        except Exception as err:
+            self._log.exception(err)
+        else:
+            for transcript in result.transcripts:
+                value = ''.join(t.text for t in transcript.tokens).strip()
+                if value:
+                    return {
+                        'transcript': value,
+                        'confidence': transcript.confidence / len(transcript.tokens),
+                    }
+        return None
+
+class IBMWatsonEngine:
+    def __init__(self, engine_params, logger):
+        self._log = logger
+        self._client = watson_speechtotext(
+            iam_apikey=engine_params['api_key'],
+            url=engine_params['service_url'],
+        )
+        self._hint_phrases = engine_params['hint_phrases']
+        self._model = engine_params['model']
+
+    def transcribe(self, buf, phrases=[]):
+        resp = self._client.recognize(
+            audio=io.BytesIO(buf),
+            content_type='audio/l16; rate={:d}; channels=1; endianness=little-endian'.format(PYMUMBLE_SAMPLERATE),
+            model=self._model,
+            keywords=list(set(phrases + self._hint_phrases)),
+            keywords_threshold=0.8,
+            profanity_filter=False,
+        )
+        try:
+            results = resp.get_result()['results']
+        except KeyError as err:
+            self._log.exception(err)
+            return None
+
+        value = '. '.join(alt['transcript'].replace('%HESITATION', '...').strip() \
+            for result in results \
+                for alt in result['alternatives']).strip()
+
+        if value:
+            conf = [alt['confidence'] \
+                for result in results
+                    for alt in result['alternatives'] \
+                    ]
+            return {
+                'transcript': value,
+                'confidence': sum(conf) / len(conf),
+            }
+        return None
+
 @multiprocessify
 def proc_transcriber(transcription_config, router_conn):
     setproctitle.setproctitle('doty: transcriber worker')
@@ -592,39 +667,14 @@ def proc_transcriber(transcription_config, router_conn):
     log.debug('Transcribing starting up')
 
     try:
-        model = stt.Model(transcription_config['model_path'])
-        model.enableExternalScorer(transcription_config['scorer_path'])
+        engine = {
+            'coqai-stt': CoqaiSTTEngine,
+            'ibm-watson': IBMWatsonEngine,
+        }.get(transcription_config['engine'])(transcription_config['engine_params'], log)
     except Exception as err:
         keep_running = False
-        log.error('Failed to load transcriber model')
+        log.error('Failed to load transcription engine')
         log.exception(err)
-
-    @contexttimer.timer(logger=log, level=logging.DEBUG)
-    def resample(buf, src_sr, dest_sr):
-        sr_ratio = float(dest_sr) / src_sr
-        return samplerate.resample(buf, sr_ratio,
-            converter_type=transcription_config['resample_algo']).astype(numpy.int16)
-
-    @contexttimer.timer(logger=log, level=logging.DEBUG)
-    def transcribe(buf, phrases=[]):
-        audio_data = numpy.frombuffer(buf, dtype=numpy.int16)
-        model_samplerate = model.sampleRate()
-        if model_samplerate != PYMUMBLE_SAMPLERATE:
-            audio_data = resample(audio_data, PYMUMBLE_SAMPLERATE, model_samplerate)
-
-        try:
-            result = model.sttWithMetadata(audio_data)
-        except Exception as err:
-            log.exception(err)
-        else:
-            for transcript in result.transcripts:
-                value = ''.join(t.text for t in transcript.tokens).strip()
-                if value:
-                    return {
-                        'transcript': value,
-                        'confidence': transcript.confidence,
-                    }
-        return None
 
     log.info('Transcriber running')
     while keep_running:
@@ -637,7 +687,8 @@ def proc_transcriber(transcription_config, router_conn):
                 if transcription_config['save_only']:
                     result = {'transcript': 'NO_DATA', 'confidence': 0.0}
                 else:
-                    result = transcribe(cmd_data['buffer'], cmd_data['phrases'])
+                    with contexttimer.Timer(output=log.debug, prefix='engine.transcribe()'):
+                        result = engine.transcribe(cmd_data['buffer'], cmd_data['phrases'])
                 if result:
                     if not transcription_config['save_only']:
                         log.debug('Transcription result: txid=%s actor=%d result=%r',
@@ -668,6 +719,29 @@ def proc_transcriber(transcription_config, router_conn):
                 log.warning('Unrecognized command: %r', cmd_data)
     log.debug('Transcriber process exiting')
 
+class GoogleTTSEngine:
+    def __init__(self, engine_params, logger):
+        self._log = logger
+        self._client = gcloud_texttospeech.TextToSpeechClient.from_service_account_json(engine_params['credentials_path'])
+        self._voice = gcloud_texttospeech.VoiceSelectionParams(
+            language_code=engine_params['language'],
+            name=engine_params['voice'],
+        )
+        self._config = gcloud_texttospeech.AudioConfig(
+            audio_encoding=gcloud_texttospeech.AudioEncoding.LINEAR16,
+            sample_rate_hertz=PYMUMBLE_SAMPLERATE,
+            effects_profile_id=engine_params['effect_profiles'],
+            speaking_rate=engine_params['speed'],
+            pitch=engine_params['pitch'],
+            volume_gain_db=engine_params['volume'],
+        )
+
+    def speak(self, text):
+        text_input = gcloud_texttospeech.SynthesisInput(text=text)
+        response = self._client.synthesize_speech(input=text_input,
+            voice=self._voice, audio_config=self._config)
+        return response.audio_content[WAV_HEADER_LEN:]
+
 @multiprocessify
 def proc_speaker(speaker_config, router_conn):
     setproctitle.setproctitle('doty: speaker worker')
@@ -675,26 +749,14 @@ def proc_speaker(speaker_config, router_conn):
     keep_running = True
     log.debug('Speaker starting up')
 
-    tts_client = gcloud_texttospeech.TextToSpeechClient.from_service_account_json(speaker_config['google_cloud_auth'])
-    tts_voice = gcloud_texttospeech.VoiceSelectionParams(
-        language_code=speaker_config['language'],
-        name=speaker_config['voice'],
-
-    )
-    tts_config = gcloud_texttospeech.AudioConfig(
-        audio_encoding=gcloud_texttospeech.AudioEncoding.LINEAR16,
-        sample_rate_hertz=PYMUMBLE_SAMPLERATE,
-        effects_profile_id=speaker_config['effect_profiles'],
-        speaking_rate=speaker_config['speed'],
-        pitch=speaker_config['pitch'],
-        volume_gain_db=speaker_config['volume'],
-    )
-
-    @contexttimer.timer(logger=log, level=logging.DEBUG)
-    def speak(text):
-        text_input = gcloud_texttospeech.SynthesisInput(text=text)
-        response = tts_client.synthesize_speech(input=text_input, voice=tts_voice, audio_config=tts_config)
-        return response.audio_content[WAV_HEADER_LEN:]
+    try:
+        engine = {
+            'gcloud-tts': GoogleTTSEngine,
+        }.get(speaker_config['engine'])(speaker_config['engine_params'], log)
+    except Exception as err:
+        keep_running = False
+        log.error('Failed to load speaker engine')
+        log.exception(err)
 
     log.info('Speaker running')
     while keep_running:
@@ -707,7 +769,8 @@ def proc_speaker(speaker_config, router_conn):
                 log.debug('Recieved speaker request: txid=%s session=%d msg=%s',
                     cmd_data['txid'], cmd_data['actor'], cmd_data['msg'])
                 try:
-                    audio = speak(cmd_data['msg'].replace(ZW_SPACE, ''))
+                    with contexttimer.Timer(output=log.debug, prefix='engine.speak()'):
+                        audio = engine.speak(cmd_data['msg'].replace(ZW_SPACE, ''))
                 except Exception as err:
                     log.exception(err)
                 else:
@@ -1111,6 +1174,8 @@ def main(args, **kwargs):
         log.error('-c/--config is required')
         raise SystemExit()
 
+    setproctitle.setproctitle('doty: master')
+
     cfg_fn = os.path.join(os.path.dirname(__file__), BASE_CONFIG_FILENAME)
     log.debug('Loading base config: %s', cfg_fn)
     with open(cfg_fn) as config_handle:
@@ -1118,7 +1183,17 @@ def main(args, **kwargs):
     log.debug('Loading user config: %s', args.config)
     with open(args.config) as config_handle:
         config = deep_merge_dict(config, yaml.safe_load(config_handle))
-    setproctitle.setproctitle('doty: master')
+    schema_fn = os.path.join(os.path.dirname(__file__), SCHEMA_FILENAME)
+    log.debug('Loading validation schema: %s', schema_fn)
+    with open(schema_fn) as schema_handle:
+        schema = yaml.safe_load(schema_handle)
+
+    try:
+        jsonschema.validate(config, schema)
+    except jsonschema.exceptions.ValidationError as err:
+        log.error('Error in config structure: %s', err.message)
+        raise SystemExit()
+    log.debug('Config validation passed')
 
     mmbl_conn = QueuePipe()
     irc_conn = QueuePipe()

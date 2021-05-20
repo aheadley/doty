@@ -51,12 +51,24 @@ router:
   enable_commands: true
 
 transcriber:
-  # https://stt.readthedocs.io/en/latest/DEPLOYMENT.html#download-models
-  model_path: 'path/to/model.pbmm'
-  scorer_path: 'path/to/scorer.scorer'
-  # https://github.com/tuxu/python-samplerate/blob/master/samplerate/converters.py#L15
-  # should be one of: sinc_best, sinc_medium, sinc_fastest, zero_order_hold, linear
-  resample_algo: sinc_best
+  # one of:
+  #   - coqai-stt: local speech-to-text, worse results than most online services
+  #   - ibm-watson: IBM's Watson STT service
+  engine: coqai-stt
+  engine_params:
+    ### coqai-stt
+    # https://stt.readthedocs.io/en/latest/DEPLOYMENT.html#download-models
+    model_path: 'path/to/model.pbmm'
+    scorer_path: 'path/to/scorer.scorer'
+    # https://github.com/tuxu/python-samplerate/blob/master/samplerate/converters.py#L15
+    # should be one of: sinc_best, sinc_medium, sinc_fastest, zero_order_hold, linear
+    resample_method: sinc_best
+
+    ### ibm-watson
+    # api_key: 'CHANGE ME'
+    # service_url: 'https://stream.watsonplatform.net/speech-to-text/api'
+    # # https://cloud.ibm.com/docs/services/speech-to-text/models.html
+    # model: en-US_BroadbandModel
   # an optional, extra vocabulary to help recognize words
   hint_phrases: []
   # path to save audio data to
@@ -65,16 +77,21 @@ transcriber:
   save_only: false
 
 speaker:
-  google_cloud_auth: 'path/to/creds.json'
-  # https://cloud.google.com/text-to-speech/docs/voices
-  language: en-US
-  voice: en-US-Wavenet-E
-  # [0.25, 4.0]
-  speed: 1.0
-  # [-20.0, 20.0]
-  pitch: 0.0
-  # [-96.0, 16.0]
-  volume: 0.0
-  # https://cloud.google.com/text-to-speech/docs/audio-profiles
-  effect_profiles:
-    - handset-class-device
+  # one of: (currently only one option)
+  #   - gcloud-tts
+  engine: gcloud-tts
+  engine_params:
+    ### gcloud-tts
+    credentials_path: 'path/to/creds.json'
+    # https://cloud.google.com/text-to-speech/docs/voices
+    language: en-US
+    voice: en-US-Wavenet-E
+    # [0.25, 4.0]
+    speed: 1.0
+    # [-20.0, 20.0]
+    pitch: 0.0
+    # [-96.0, 16.0]
+    volume: 0.0
+    # https://cloud.google.com/text-to-speech/docs/audio-profiles
+    effect_profiles:
+      - handset-class-device
