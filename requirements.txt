@@ -11,4 +11,5 @@ requests==2.25.1
 samplerate==0.1.0
 setproctitle==1.2.2
 stt==0.10.0a6
+https://github.com/aheadley/TTS/archive/refs/heads/main.tar.gz
 watson-developer-cloud==2.10.1

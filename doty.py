@@ -56,6 +56,7 @@ from pymumble_py3.errors import (
     UnknownChannelError,
 )
 import stt as coqai_speechtotext
+import TTS as coqai_texttospeech
 from watson_developer_cloud import SpeechToTextV1 as watson_speechtotext
 
 APP_NAME = 'doty'
@@ -136,6 +137,10 @@ def denotify_username(username):
         return ZW_SPACE.join([username[0], username[1:-1], username[-1]]).replace(ZW_SPACE * 2, ZW_SPACE)
     else:
         return username
+
+def audio_resample(buf, src_sr, dest_sr, method='sinc_best'):
+    sr_ratio = float(dest_sr) / src_sr
+    return samplerate.resample(buf, sr_ratio, converter_type=method).astype(numpy.int16)
 
 class QueuePipe:
     @staticmethod
@@ -594,16 +599,12 @@ class CoqaiSTTEngine:
         self._model.enableExternalScorer(engine_params['scorer_path'])
         self._resample_method = engine_params['resample_method']
 
-    def _resample(self, buf, src_sr, dest_sr):
-        sr_ratio = float(dest_sr) / src_sr
-        return samplerate.resample(buf, sr_ratio,
-            converter_type=self._resample_method).astype(numpy.int16)
-
     def transcribe(self, buf, phrases=[]):
         audio_data = numpy.frombuffer(buf, dtype=numpy.int16)
         model_samplerate = self._model.sampleRate()
         if model_samplerate != PYMUMBLE_SAMPLERATE:
-            audio_data = self._resample(audio_data, PYMUMBLE_SAMPLERATE, model_samplerate)
+            audio_data = audio_resample(audio_data, PYMUMBLE_SAMPLERATE,
+                model_samplerate, self._resample_method)
 
         try:
             result = self._model.sttWithMetadata(audio_data)
@@ -719,6 +720,38 @@ def proc_transcriber(transcription_config, router_conn):
                 log.warning('Unrecognized command: %r', cmd_data)
     log.debug('Transcriber process exiting')
 
+class CoqaiTTSEngine:
+    def __init__(self, engine_params, logger):
+        self._log = logger
+        from TTS.utils.manage import ModelManager
+        from TTS.utils.synthesizer import Synthesizer
+
+        self._resample_method = engine_params['resample_method']
+        self._model_manager = ModelManager(
+            os.path.join(os.path.dirname(coqai_texttospeech.__file__), '.models.json'))
+        model_path, model_config_path, model_item = self._model_manager.download_model(
+            'tts_models/' + engine_params['model'])
+        vocoder_path, vocoder_config_path, _ = self._model_manager.download_model(
+            'vocoder_models/' + engine_params['vocoder'] if engine_params['vocoder'] else model_item['default_vocoder'])
+
+        self._synth = Synthesizer(
+            model_path,
+            model_config_path,
+            None, # speakers_file_path
+            vocoder_path,
+            vocoder_config_path,
+            None, # encoder_path
+            None, # encoder_config_path
+            False, # use_cuda
+        )
+
+    def speak(self, text):
+        audio = numpy.array(self._synth.tts(text, None, None))
+        norm_audio = audio * (32767 / max(0.01, numpy.max(numpy.abs(audio))))
+        resampled_audio = audio_resample(norm_audio,
+            self._synth.output_sample_rate, PYMUMBLE_SAMPLERATE, self._resample_method)
+        return bytes(resampled_audio)
+
 class GoogleTTSEngine:
     def __init__(self, engine_params, logger):
         self._log = logger
@@ -751,6 +784,7 @@ def proc_speaker(speaker_config, router_conn):
 
     try:
         engine = {
+            'coqai-tts': CoqaiTTSEngine,
             'gcloud-tts': GoogleTTSEngine,
         }.get(speaker_config['engine'])(speaker_config['engine_params'], log)
     except Exception as err:

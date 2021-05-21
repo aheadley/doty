@@ -77,21 +77,27 @@ transcriber:
   save_only: false
 
 speaker:
-  # one of: (currently only one option)
+  # one of:
+  #   - coqai-tts
   #   - gcloud-tts
-  engine: gcloud-tts
+  engine: coqai-tts
   engine_params:
-    ### gcloud-tts
-    credentials_path: 'path/to/creds.json'
-    # https://cloud.google.com/text-to-speech/docs/voices
-    language: en-US
-    voice: en-US-Wavenet-E
-    # [0.25, 4.0]
-    speed: 1.0
-    # [-20.0, 20.0]
-    pitch: 0.0
-    # [-96.0, 16.0]
-    volume: 0.0
-    # https://cloud.google.com/text-to-speech/docs/audio-profiles
-    effect_profiles:
-      - handset-class-device
+    ### coqai-tts
+    model: en/ljspeech/tacotron2-DDC
+    vocoder: null
+    resample_method: sinc_best
+
+    # ### gcloud-tts
+    # credentials_path: 'path/to/creds.json'
+    # # https://cloud.google.com/text-to-speech/docs/voices
+    # language: en-US
+    # voice: en-US-Wavenet-E
+    # # [0.25, 4.0]
+    # speed: 1.0
+    # # [-20.0, 20.0]
+    # pitch: 0.0
+    # # [-96.0, 16.0]
+    # volume: 0.0
+    # # https://cloud.google.com/text-to-speech/docs/audio-profiles
+    # effect_profiles:
+    #   - handset-class-device
