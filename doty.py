@@ -56,8 +56,8 @@ from pymumble_py3.constants import (
 from pymumble_py3.errors import (
     UnknownChannelError,
 )
-import stt as coqai_speechtotext
-import TTS as coqai_texttospeech
+import stt as coqui_speechtotext
+import TTS as coqui_texttospeech
 from watson_developer_cloud import SpeechToTextV1 as watson_speechtotext
 
 APP_NAME = 'doty'
@@ -593,10 +593,10 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
             keep_running = False
     log.debug('Mumble process exiting')
 
-class CoqaiSTTEngine:
+class CoquiSTTEngine:
     def __init__(self, engine_params, logger):
         self._log = logger
-        self._model = coqai_speechtotext.Model(engine_params['model_path'])
+        self._model = coqui_speechtotext.Model(engine_params['model_path'])
         self._model.enableExternalScorer(engine_params['scorer_path'])
         self._resample_method = engine_params['resample_method']
 
@@ -699,7 +699,7 @@ def proc_transcriber(transcription_config, router_conn):
 
     try:
         engine = {
-            'coqai-stt': CoqaiSTTEngine,
+            'coqui-stt': CoquiSTTEngine,
             'vosk': VoskSTTEngine,
             'ibm-watson': IBMWatsonEngine,
         }.get(transcription_config['engine'])(transcription_config['engine_params'], log)
@@ -751,7 +751,7 @@ def proc_transcriber(transcription_config, router_conn):
                 log.warning('Unrecognized command: %r', cmd_data)
     log.debug('Transcriber process exiting')
 
-class CoqaiTTSEngine:
+class CoquiTTSEngine:
     def __init__(self, engine_params, logger):
         self._log = logger
         from TTS.utils.manage import ModelManager
@@ -759,7 +759,7 @@ class CoqaiTTSEngine:
 
         self._resample_method = engine_params['resample_method']
         self._model_manager = ModelManager(
-            os.path.join(os.path.dirname(coqai_texttospeech.__file__), '.models.json'))
+            os.path.join(os.path.dirname(coqui_texttospeech.__file__), '.models.json'))
         model_path, model_config_path, model_item = self._model_manager.download_model(
             'tts_models/' + engine_params['model'])
         vocoder_path, vocoder_config_path, _ = self._model_manager.download_model(
@@ -815,7 +815,7 @@ def proc_speaker(speaker_config, router_conn):
 
     try:
         engine = {
-            'coqai-tts': CoqaiTTSEngine,
+            'coqui-tts': CoquiTTSEngine,
             'gcloud-tts': GoogleTTSEngine,
         }.get(speaker_config['engine'])(speaker_config['engine_params'], log)
     except Exception as err:

@@ -52,12 +52,12 @@ router:
 
 transcriber:
   # one of:
-  #   - coqai-stt: local speech-to-text, worse results than most online services
+  #   - coqui-stt: local speech-to-text, worse results than most online services
   #   - vosk: local speech-to-text, pretty good results
   #   - ibm-watson: IBM's Watson STT service
   engine: vosk
   engine_params: {}
-    ### coqai-stt
+    ### coqui-stt
     # # https://stt.readthedocs.io/en/latest/DEPLOYMENT.html#download-models
     # model_path: 'path/to/model.pbmm'
     # scorer_path: 'path/to/scorer.scorer'
@@ -84,11 +84,11 @@ transcriber:
 
 speaker:
   # one of:
-  #   - coqai-tts
+  #   - coqui-tts
   #   - gcloud-tts
-  engine: coqai-tts
+  engine: coqui-tts
   engine_params: {}
-    ### coqai-tts
+    ### coqui-tts
     # model: en/ljspeech/tacotron2-DDC
     # vocoder: null
     # resample_method: sinc_best

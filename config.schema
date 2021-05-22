@@ -105,7 +105,7 @@ properties:
       engine:
         type: string
         enum:
-          - coqai-stt
+          - coqui-stt
           - vosk
           - ibm-watson
       engine_params:
@@ -124,7 +124,7 @@ properties:
       - if:
           properties:
             engine:
-              const: coqai-stt
+              const: coqui-stt
         then:
           properties:
             engine_params:
@@ -203,7 +203,7 @@ properties:
       engine:
         type: string
         enum:
-          - coqai-tts
+          - coqui-tts
           - gcloud-tts
       engine_params:
         type: object
@@ -211,7 +211,7 @@ properties:
       - if:
           properties:
             engine:
-              const: coqai-tts
+              const: coqui-tts
         then:
           properties:
             engine_params:
