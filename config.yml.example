@@ -53,16 +53,22 @@ router:
 transcriber:
   # one of:
   #   - coqai-stt: local speech-to-text, worse results than most online services
+  #   - vosk: local speech-to-text, pretty good results
   #   - ibm-watson: IBM's Watson STT service
-  engine: coqai-stt
-  engine_params:
+  engine: vosk
+  engine_params: {}
     ### coqai-stt
-    # https://stt.readthedocs.io/en/latest/DEPLOYMENT.html#download-models
-    model_path: 'path/to/model.pbmm'
-    scorer_path: 'path/to/scorer.scorer'
-    # https://github.com/tuxu/python-samplerate/blob/master/samplerate/converters.py#L15
-    # should be one of: sinc_best, sinc_medium, sinc_fastest, zero_order_hold, linear
-    resample_method: sinc_best
+    # # https://stt.readthedocs.io/en/latest/DEPLOYMENT.html#download-models
+    # model_path: 'path/to/model.pbmm'
+    # scorer_path: 'path/to/scorer.scorer'
+    # # https://github.com/tuxu/python-samplerate/blob/master/samplerate/converters.py#L15
+    # # should be one of: sinc_best, sinc_medium, sinc_fastest, zero_order_hold, linear
+    # resample_method: sinc_best
+
+    ### vosk
+    # # https://alphacephei.com/vosk/models
+    # model_path: 'path/to/model-dir'
+    # resample_method: sinc_best
 
     ### ibm-watson
     # api_key: 'CHANGE ME'
@@ -81,13 +87,13 @@ speaker:
   #   - coqai-tts
   #   - gcloud-tts
   engine: coqai-tts
-  engine_params:
+  engine_params: {}
     ### coqai-tts
-    model: en/ljspeech/tacotron2-DDC
-    vocoder: null
-    resample_method: sinc_best
+    # model: en/ljspeech/tacotron2-DDC
+    # vocoder: null
+    # resample_method: sinc_best
 
-    # ### gcloud-tts
+    ### gcloud-tts
     # credentials_path: 'path/to/creds.json'
     # # https://cloud.google.com/text-to-speech/docs/voices
     # language: en-US

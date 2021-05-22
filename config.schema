@@ -106,6 +106,7 @@ properties:
         type: string
         enum:
           - coqai-stt
+          - vosk
           - ibm-watson
       engine_params:
         type: object
@@ -144,6 +145,29 @@ properties:
               required:
                 - model_path
                 - scorer_path
+                - resample_method
+              additionalProperties: false
+      - if:
+          properties:
+            engine:
+              const: vosk
+        then:
+          properties:
+            engine_params:
+              type: object
+              properties:
+                model_path:
+                  type: string
+                resample_method:
+                  type: string
+                  enum:
+                    - sinc_best
+                    - sinc_medium
+                    - sinc_fastest
+                    - zero_order_hold
+                    - linear
+              required:
+                - model_path
                 - resample_method
               additionalProperties: false
       - if:

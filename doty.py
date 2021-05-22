@@ -10,6 +10,7 @@ import hashlib
 import html
 import io
 import itertools
+import json
 import os
 import os.path
 import queue
@@ -620,6 +621,35 @@ class CoqaiSTTEngine:
                     }
         return None
 
+class VoskSTTEngine:
+    KALDI_SAMPLERATE = 16000
+    def __init__(self, engine_params, logger):
+        from vosk import Model, KaldiRecognizer, SetLogLevel
+
+        self._log = logger
+        self._resample_method = engine_params['resample_method']
+        model = Model(engine_params['model_path'])
+        self._recognizer = KaldiRecognizer(model, self.KALDI_SAMPLERATE)
+
+    def transcribe(self, buf, phrases=[]):
+        audio = bytes(audio_resample(
+            numpy.frombuffer(buf, dtype=numpy.int16),
+            PYMUMBLE_SAMPLERATE, self.KALDI_SAMPLERATE, 
+            self._resample_method))
+        self._recognizer.AcceptWaveform(audio)
+        result = json.loads(self._recognizer.FinalResult())
+
+        try:
+            if result['text'].strip():
+                return {
+                    'transcript': result['text'].strip(),
+                    'confidence': sum(t['conf'] for t in result['result']) / len(result['result']) \
+                        if 'result' in result else 0.0,
+                }
+        except Exception as err:
+            log.exception(err)
+        return None
+
 class IBMWatsonEngine:
     def __init__(self, engine_params, logger):
         self._log = logger
@@ -670,6 +700,7 @@ def proc_transcriber(transcription_config, router_conn):
     try:
         engine = {
             'coqai-stt': CoqaiSTTEngine,
+            'vosk': VoskSTTEngine,
             'ibm-watson': IBMWatsonEngine,
         }.get(transcription_config['engine'])(transcription_config['engine_params'], log)
     except Exception as err:
