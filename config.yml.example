@@ -30,11 +30,6 @@ irc:
   allow_ipv6: true
 
 router:
-  # the words or phrases to signal a voice command, think "ok google" or "alexa"
-  #   NOTE: not yet used, but will be for voice-activated commands
-  activation_words:
-    - doty
-    - dodie
   # how long to wait after the last audio packet recieved from a user before
   # sending the audio off for transcription
   wait_time: 1.5
@@ -49,6 +44,13 @@ router:
   startup_message: Reactor Online. Sensors Online. Weapons Online. All Systems Nominal.
   # set this to false to make the bot ignore any !commands
   enable_commands: true
+  command_params:
+    # the words or phrases to signal a voice command, think "ok google" or "alexa"
+    activation_words:
+      - doty
+      - dodie
+    # WolframAlpha Client ID
+    api_key: 'CHANGE-ME'
 
 transcriber:
   # one of:

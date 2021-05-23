@@ -67,10 +67,6 @@ properties:
 
   router:
     properties:
-      activation_words:
-        type: array
-        items:
-          type: string
       wait_time:
         type: number
         minimum: 0.0
@@ -90,14 +86,27 @@ properties:
           - "null"
       enable_commands:
         type: boolean
+      command_params:
+        type: object
+        properties:
+          activation_words:
+            type: array
+            items:
+              type: string
+          api_key:
+            type: string
+        required:
+          - activation_words
+          - api_key
+        additionalProperties: false
     required:
-      - activation_words
       - wait_time
       - min_buffer_len
       - mixed_buffer_len
       - ignore
       - startup_message
       - enable_commands
+      - command_params
     additionalProperties: false
 
   transcriber:

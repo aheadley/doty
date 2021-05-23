@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import collections
+import datetime
 import logging
 import subprocess
 import multiprocessing
@@ -14,6 +15,7 @@ import json
 import os
 import os.path
 import queue
+import random
 import signal
 import ssl
 import struct
@@ -34,9 +36,12 @@ import numpy
 import requests
 import samplerate
 import setproctitle
+import snips_nlu
+import wolframalpha
 import yaml
 
 from bs4 import BeautifulSoup
+from fuzzywuzzy import process
 from google.cloud import texttospeech as gcloud_texttospeech
 from numpy_ringbuffer import RingBuffer
 import pymumble_py3 as pymumble
@@ -351,6 +356,9 @@ class MumbleControlCommand(Enum):
     RECV_USER_AUDIO = auto()
     SEND_USER_AUDIO_MSG = auto()
 
+    DROP_CHANNEL_AUDIO_BUFFER = auto()
+    DROP_USER_AUDIO_BUFFER = auto()
+
 class IrcControlCommand(Enum):
     EXIT = auto()
     USER_CREATE = auto()
@@ -586,6 +594,9 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
             elif cmd_data['cmd'] == MumbleControlCommand.SEND_CHANNEL_AUDIO_MSG:
                 log.info('Sending audio message: %d bytes', len(cmd_data['buffer']))
                 mmbl.sound_output.add_sound(cmd_data['buffer'])
+            elif cmd_data['cmd'] == MumbleControlCommand.DROP_CHANNEL_AUDIO_BUFFER:
+                log.info('Dropping outgoing audio buffer')
+                mmbl.sound_output.clear_buffer()
             else:
                 log.warning('Unrecognized command: %r', cmd_data)
         if not mmbl.is_alive():
@@ -872,6 +883,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
     speak_conn._swap()
 
     def say(msg, source_id=0):
+        log.debug('Speaking message: %s', msg)
         return speak_conn.send({
             'cmd': SpeakerControlCommand.SPEAK_MESSAGE,
             'msg': msg,
@@ -904,6 +916,159 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
     def upload(handle):
         resp = requests.post('https://0x0.st/', files={'file': handle})
         return resp.text.strip()
+
+    class VoiceCommandParser:
+        DATASET_FILENAMES = [
+            'command-dataset.yml',
+        ]
+        UNKNOWN_INTENT_RESPONSES = [
+            'Sorry, I didn\'t understand that.',
+            'What was that?',
+            'Sorry, could you say that again?',
+            'What did you say?',
+            'Would you repeat that?',
+            'I don\'t know what you mean.',
+        ]
+        _handler_registry = {}
+
+        def register_handler(intent):
+            def wrapper(func):
+                func.handled_intent = intent
+                return func
+            return wrapper
+
+        def __init__(self, config):
+            self._setup_registry()
+            self._engine = self._setup_parse_engine()
+            self._wa_client = self._setup_wolfram_alpha(config['api_key'])
+
+        def _setup_registry(self):
+            for member in self.__class__.__dict__.values():
+                try:
+                    self.__class__._handler_registry[member.handled_intent] = member
+                    log.debug('Added handler for intent: %s', member.handled_intent)
+                except AttributeError:
+                    continue
+
+        def _setup_wolfram_alpha(self, api_key):
+            return wolframalpha.Client(api_key)
+
+        def _setup_parse_engine(self):
+            engine = snips_nlu.SnipsNLUEngine(config=snips_nlu.default_configs.CONFIG_EN)
+            log.info('Training model on datasets: %s', ', '.join(self.DATASET_FILENAMES))
+            with contexttimer.Timer() as t:
+                dataset = snips_nlu.dataset.Dataset.from_yaml_files('en',
+                    [os.path.join(os.path.dirname(__file__), ds) for ds in self.DATASET_FILENAMES])
+                engine.fit(dataset.json)
+            log.debug('Model trained in %0.3fs', t.elapsed)
+            return engine
+
+        def _duration_to_dt(self, duration):
+            dt = datetime.timedelta(
+                days=duration['days'],
+                seconds=duration['seconds'],
+                minutes=duration['minutes'],
+                hours=duration['hours'],
+                weeks=duration['weeks'])
+            return dt
+
+        def dispatch(self, src, msg):
+            result = self._engine.parse(msg)
+            log.debug('Intent parse result: %s', result)
+            intent = result['intent']['intentName'] or '__UNKNOWN__'
+            try:
+                handler = self.__class__._handler_registry[intent]
+            except KeyError:
+                log.warning('No registered handler for intent: %s', intent)
+            else:
+                slots = {s['slotName']: s['value'] for s in result['slots']}
+                for k in slots:
+                    try:
+                        slots[k] = slots[k]['value']
+                    except TypeError:
+                        continue
+                return handler(self, src, result['input'], **slots)
+
+        @register_handler('__UNKNOWN__')
+        def unknown_intent(self, src, input):
+            say(random.choice(self.UNKNOWN_INTENT_RESPONSES))
+
+        @register_handler('greeting')
+        def cmd_greeting(self, src, input):
+            say('Hello {}'.format(src['name']))
+
+        @register_handler('help')
+        def cmd_help(self, src, input):
+            say('You can tell me to: make an audio clip, replay audio, or change to a different channel')
+
+        @register_handler('cmd_generate_clip')
+        def cmd_generate_clip(self, src, input, duration=None):
+            try:
+                if duration is None:
+                    seconds = router_config['mixed_buffer_len'] / 2
+                seconds = min(self._duration_to_dt(duration).seconds, router_config['mixed_buffer_len'])
+            except (ValueError, IndexError):
+                seconds = router_config['mixed_buffer_len'] / 2
+            with io.BytesIO(buffer2wav(MIXED_BUFFER.get_last(seconds))) as f:
+                url = upload(f)
+            if url:
+                resp = 'Clip of the last {} seconds: {}'.format(
+                    seconds, url)
+                irc_conn.send({
+                    'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
+                    'msg': resp,
+                })
+                mmbl_conn.send({
+                    'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
+                    'msg': resp,
+                })
+            else:
+                say('I wasn\'t able to upload the audio clip')
+                log.warning('Failed to upload audio clip')
+
+        @register_handler('cmd_replay_audio')
+        def cmd_replay_audio(self, src, input, duration=None):
+            if duration is None:
+                say('You need to include how long you want me to replay')
+                return
+            seconds = min(self._duration_to_dt(duration).seconds, router_config['mixed_buffer_len'])
+
+            buf = MIXED_BUFFER.get_last(seconds)
+            MIXED_BUFFER.add_buffer(buf)
+            mmbl_conn.send({
+                'cmd': MumbleControlCommand.SEND_CHANNEL_AUDIO_MSG,
+                'buffer': buf,
+            })
+
+        @register_handler('cmd_change_channel')
+        def cmd_change_channel(self, src, input, destination=None):
+            if destination is None:
+                say('Include the channel I should move to')
+                return
+
+            channel = process.extractOne(destination, [c['name'] for c in MMBL_CHANNELS.values()])[0]
+            log.info('Attempting to move to channel: %s', channel)
+            mmbl_conn.send({
+                'cmd': MumbleControlCommand.MOVE_TO_CHANNEL,
+                'channel_name': channel,
+            })
+
+        @register_handler('cmd_wolfram_alpha_query')
+        def cmd_wolfram_alpha_query(self, src, input, query=None):
+            if query is None:
+                say(random.choice(self.UNKNOWN_INTENT_RESPONSES))
+                return
+            result = self._wa_client.query(input)
+            say(next(result.results).text)
+
+        @register_handler('cmd_silence')
+        def cmd_silence(self, src, input):
+            mmbl_conn.send({
+                'cmd': MumbleControlCommand.DROP_CHANNEL_AUDIO_BUFFER,
+            })
+
+    if router_config['enable_commands']:
+        cmd_engine = VoiceCommandParser(router_config['command_params'])
 
     if router_config['startup_message']:
         say(router_config['startup_message'])
@@ -1158,9 +1323,15 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                 })
                 cmd_msg = cmd_data['result']['transcript'].strip()
                 if any(cmd_msg.lower().startswith(actword.lower()) \
-                        for actword in router_config['activation_words']):
+                        for actword in router_config['command_params']['activation_words']):
                     activation_word, voice_cmd = cmd_msg.split(' ', 1)
                     log.debug('Found possible voice command: @%s %s', activation_word, voice_cmd)
+                    if router_config['enable_commands']:
+                        try:
+                            cmd_engine.dispatch(sender, voice_cmd)
+                        except Exception as err:
+                            log.error('Exception while processing voice command')
+                            log.exception(err)
             else:
                 log.warning('Unrecognized command from transcriber: %r', cmd_data)
 
@@ -1206,7 +1377,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                         'username': user['name'],
                         'buffer': audio_buffer,
                         'phrases': [u['name'] for u in MMBL_USERS.values()] \
-                            + router_config['activation_words'] \
+                            + router_config['command_params']['activation_words'] \
                             + IRC_USERS,
                         'txid': txid,
                     })
@@ -1225,7 +1396,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                             'actor': user['session'],
                             'username': user['name'],
                             'buffer': audio_buffer,
-                            'phrases': [u['name'] for u in MMBL_USERS.values()] + router_config['activation_words'],
+                            'phrases': [u['name'] for u in MMBL_USERS.values()] + router_config['command_params']['activation_words'],
                             'txid': txid,
                         })
                         data['buffer'].clear()
