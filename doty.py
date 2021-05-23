@@ -1075,7 +1075,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
             self._buy_time_to_answer()
             result = self._wa_client.query(input)
             try:
-                answer = next(result.results.text)
+                answer = next(result.results).text
             except StopIteration:
                 say('I don\'t know')
             else:
