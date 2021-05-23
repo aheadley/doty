@@ -935,6 +935,11 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
             'Would you repeat that?',
             'I don\'t know what you mean.',
         ]
+        INTERSTITIAL_RESPONSES = [
+            'Uhmm',
+            'Let me see',
+            'Hhmm',
+        ]
         _handler_registry = {}
 
         def register_handler(intent):
@@ -977,6 +982,9 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                 hours=duration['hours'],
                 weeks=duration['weeks'])
             return dt
+
+        def _buy_time_to_answer(self):
+            say(random.choice(self.INTERSTITIAL_RESPONSES))
 
         def dispatch(self, src, msg):
             result = self._engine.parse(msg)
@@ -1064,8 +1072,14 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
             if query is None:
                 say(random.choice(self.UNKNOWN_INTENT_RESPONSES))
                 return
+            self._buy_time_to_answer()
             result = self._wa_client.query(input)
-            say(next(result.results).text)
+            try:
+                answer = next(result.results.text)
+            except StopIteration:
+                say('I don\'t know')
+            else:
+                say(answer)
 
         @register_handler('cmd_silence')
         def cmd_silence(self, src, input):
