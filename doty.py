@@ -999,16 +999,16 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
 
         @register_handler('help')
         def cmd_help(self, src, input):
-            say('You can tell me to: make an audio clip, replay audio, or change to a different channel')
+            say('You can tell me to: make an audio clip or replay audio, change '
+                'to a different channel, or just ask a question')
 
         @register_handler('cmd_generate_clip')
         def cmd_generate_clip(self, src, input, duration=None):
-            try:
-                if duration is None:
-                    seconds = router_config['mixed_buffer_len'] / 2
-                seconds = min(self._duration_to_dt(duration).seconds, router_config['mixed_buffer_len'])
-            except (ValueError, IndexError):
+            if duration is None:
                 seconds = router_config['mixed_buffer_len'] / 2
+            else:
+                seconds = min(self._duration_to_dt(duration).seconds, router_config['mixed_buffer_len'])
+
             with io.BytesIO(buffer2wav(MIXED_BUFFER.get_last(seconds))) as f:
                 url = upload(f)
             if url:
