@@ -628,6 +628,7 @@ class VoskSTTEngine:
 
         self._log = logger
         self._resample_method = engine_params['resample_method']
+        SetLogLevel(0 if EXTRA_DEBUG else -1000)
         model = Model(engine_params['model_path'])
         self._recognizer = KaldiRecognizer(model, self.KALDI_SAMPLERATE)
 
@@ -961,19 +962,21 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                             # !clip command
                             if msg.startswith('!clip'):
                                 try:
-                                    seconds = int(msg.strip().split(' ')[1])
+                                    seconds = min(int(msg.strip().split(' ')[1]), router_config['mixed_buffer_len'])
                                 except (ValueError, IndexError):
                                     seconds = router_config['mixed_buffer_len']
                                 with io.BytesIO(buffer2wav(MIXED_BUFFER.get_last(seconds))) as f:
                                     url = upload(f)
                                 if url:
+                                    resp = 'Clip of the last {} seconds: {}'.format(
+                                        seconds, url)
                                     irc_conn.send({
                                         'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
-                                        'msg': url,
+                                        'msg': resp,
                                     })
                                     mmbl_conn.send({
                                         'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
-                                        'msg': url,
+                                        'msg': resp,
                                     })
                                 else:
                                     log.warning('Failed to upload audio clip')
@@ -1156,7 +1159,8 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                 cmd_msg = cmd_data['result']['transcript'].strip()
                 if any(cmd_msg.lower().startswith(actword.lower()) \
                         for actword in router_config['activation_words']):
-                    log.debug('Found possible voice command: %s', cmd_msg)
+                    activation_word, voice_cmd = cmd_msg.split(' ', 1)
+                    log.debug('Found possible voice command: @%s %s', activation_word, voice_cmd)
             else:
                 log.warning('Unrecognized command from transcriber: %r', cmd_data)
 
@@ -1337,6 +1341,8 @@ def main(args, **kwargs):
 
     log.info('Shutdown complete')
 
+LOG_LEVEL = logging.INFO
+EXTRA_DEBUG = False
 if __name__ == '__main__':
     import argparse
 
