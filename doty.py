@@ -852,6 +852,7 @@ def proc_speaker(speaker_config, router_conn):
                 try:
                     with contexttimer.Timer(output=log.debug, prefix='engine.speak()'):
                         audio = speak(cmd_data['msg'].replace(ZW_SPACE, ''))
+                    log.debug('speak() LRU hit rate: %0.2f', speak.hits / (speak.hits + speak.misses))
                 except Exception as err:
                     log.exception(err)
                 else:
