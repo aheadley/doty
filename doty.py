@@ -852,7 +852,8 @@ def proc_speaker(speaker_config, router_conn):
                 try:
                     with contexttimer.Timer(output=log.debug, prefix='engine.speak()'):
                         audio = speak(cmd_data['msg'].replace(ZW_SPACE, ''))
-                    log.debug('speak() LRU hit rate: %0.2f', speak.hits / (speak.hits + speak.misses))
+                    c = speak.cache_info()
+                    log.debug('speak() LRU hit rate: %0.2f', c.hits / (c.hits + c.misses))
                 except Exception as err:
                     log.exception(err)
                 else:
@@ -990,7 +991,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                 for k in slots:
                     try:
                         slots[k] = slots[k]['value']
-                    except TypeError:
+                    except (TypeError, KeyError, IndexError):
                         continue
                 return handler(self, src, result['input'], **slots)
 
