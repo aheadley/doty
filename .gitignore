@@ -121,6 +121,7 @@ dmypy.json
 # Config files
 *.yml
 *.yaml
+!command-dataset.yml
 
 # STT model/scorer
 *.pbmm
