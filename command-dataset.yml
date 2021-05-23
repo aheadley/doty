@@ -1,0 +1,88 @@
+---
+type: intent
+name: greeting
+utterances:
+  - hi
+  - hello
+  - "what's up"
+  - how are you
+
+---
+type: intent
+name: help
+utterances:
+  - help
+  - how do i use you
+  - what can you do
+  - tell me what to do
+
+---
+type: intent
+name: cmd_generate_clip
+slots:
+  - name: duration
+    entity: snips/duration
+utterances:
+  - save a [duration](twenty second) clip
+  - make a [duration] clip
+  - save the last [duration]
+  - upload the last [duration](thirty seconds)
+  - clip the last [duration]
+
+---
+type: intent
+name: cmd_replay_audio
+slots:
+  - name: duration
+    entity: snips/duration
+utterances:
+  - play back the last [duration](thirty two seconds)
+  - replay [duration](sixty seconds)
+
+---
+type: intent
+name: cmd_change_channel
+slots:
+  - name: destination
+    entity: channel
+utterances:
+  - go to [destination](hunt)
+  - move to channel [destination](root)
+  - go in [destination](afk)
+  - move to the [destination](server) room
+
+---
+type: entity
+name: channel
+automatically_extensible: true
+
+---
+type: intent
+name: cmd_wolfram_alpha_query
+slots:
+  - name: query
+    entity: query
+utterances:
+  - when was [query](michael jackson born)
+  - when was [query](the first woodstock festival)
+  - when is [query](the next full moon)
+  - who was [query](the first astronaut)
+  - who is [query](john lennon)
+  - how many [query](feet in a mile)
+  - how many [query](calories are in a potato)
+  - what is [query](the speed of an unladen swallow)
+  - what is [query](the phase of the moon)
+  - what is [query](the temperature in denver)
+
+---
+type: entity
+name: query
+automatically_extensible: true
+
+---
+type: intent
+name: cmd_silence
+utterances:
+  - be quiet
+  - shut up
+  - stop
