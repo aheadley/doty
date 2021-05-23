@@ -89,3 +89,45 @@ utterances:
   - be quiet
   - shut up
   - stop
+
+---
+type: intent
+name: cmd_play_radio
+slots:
+  - name: station
+    entity: radio_station
+utterances:
+  - play [station](non stop pop) on the radio
+  - play [station] for me
+  - put on [station]
+
+---
+type: entity
+name: radio_station
+automatically_extensible: false
+values: []
+
+---
+type: intent
+name: cmd_play_media
+slots:
+  - name: source
+    entity: media_source
+  - name: track
+    entity: snips/MusicTrack
+  - name: artist
+    entity: snips/MusicArtist
+  - name: album
+    entity: snips/MusicAlbum
+utterances:
+  - play [track] from [source]
+  - play [track] by [artist] on [source]
+  - find [track] on [source]
+  - check [source] for [track]
+
+---
+type: entity
+name: media_source
+automatically_extensible: false
+values:
+  - youtube
