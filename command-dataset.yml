@@ -73,6 +73,9 @@ utterances:
   - what is [query](the speed of an unladen swallow)
   - what is [query](the phase of the moon)
   - what is [query](the temperature in denver)
+  - how many [query](ducks live in a pond)
+  - tell me [query](when martin luther king junior died)
+  - tell me [query](a joke)
 
 ---
 type: entity
