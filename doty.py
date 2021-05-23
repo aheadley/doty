@@ -835,6 +835,10 @@ def proc_speaker(speaker_config, router_conn):
         log.error('Failed to load speaker engine')
         log.exception(err)
 
+    @functools.lru_cache
+    def speak(msg):
+        return engine.speak(msg)
+
     log.info('Speaker running')
     while keep_running:
         if router_conn.poll(LONG_POLL):
@@ -847,7 +851,7 @@ def proc_speaker(speaker_config, router_conn):
                     cmd_data['txid'], cmd_data['actor'], cmd_data['msg'])
                 try:
                     with contexttimer.Timer(output=log.debug, prefix='engine.speak()'):
-                        audio = engine.speak(cmd_data['msg'].replace(ZW_SPACE, ''))
+                        audio = speak(cmd_data['msg'].replace(ZW_SPACE, ''))
                 except Exception as err:
                     log.exception(err)
                 else:
