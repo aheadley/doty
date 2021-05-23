@@ -1330,14 +1330,18 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                 cmd_msg = cmd_data['result']['transcript'].strip()
                 if any(cmd_msg.lower().startswith(actword.lower()) \
                         for actword in router_config['command_params']['activation_words']):
-                    activation_word, voice_cmd = cmd_msg.split(' ', 1)
-                    log.debug('Found possible voice command: @%s %s', activation_word, voice_cmd)
-                    if router_config['enable_commands']:
-                        try:
-                            cmd_engine.dispatch(sender, voice_cmd)
-                        except Exception as err:
-                            log.error('Exception while processing voice command')
-                            log.exception(err)
+                    try:
+                        activation_word, voice_cmd = cmd_msg.split(' ', 1)
+                    except ValueError:
+                        pass
+                    else:
+                        log.debug('Found possible voice command: @%s %s', activation_word, voice_cmd)
+                        if router_config['enable_commands']:
+                            try:
+                                cmd_engine.dispatch(sender, voice_cmd)
+                            except Exception as err:
+                                log.error('Exception while processing voice command')
+                                log.exception(err)
             else:
                 log.warning('Unrecognized command from transcriber: %r', cmd_data)
 
