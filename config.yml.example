@@ -39,7 +39,7 @@ router:
   mixed_buffer_len: 120
   # username/nicks to ignore in IRC and Mumble, applies to both text and audio
   ignore: []
-  # This will be spoken at bot startup, set to false or '' (empty string) to disable
+  # This will be spoken at bot startup, set to null or '' (empty string) to disable
   # https://www.youtube.com/watch?v=QrWAdq8e_uA
   startup_message: Reactor Online. Sensors Online. Weapons Online. All Systems Nominal.
   # set this to false to make the bot ignore any !commands
@@ -50,7 +50,10 @@ router:
       - doty
       - dodie
     # WolframAlpha Client ID
-    api_key: 'CHANGE-ME'
+    wolframalpha_api_key: 'CHANGE-ME'
+
+    icecast_base_url: 'https://overviewer.org/radio'
+    youtube_api_credentials_path: 'path/to/creds.json'
 
 transcriber:
   # one of:

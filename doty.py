@@ -19,6 +19,7 @@ import random
 import signal
 import ssl
 import struct
+import subprocess
 import tempfile
 import time
 import wave
@@ -81,6 +82,8 @@ SOUNDCHUNK_SIZE = 1920
 AUDIO_CHANNELS = 1
 SAMPLE_FRAME_FORMAT = '<h'
 SAMPLE_FRAME_SIZE = struct.calcsize(SAMPLE_FRAME_FORMAT)
+VOLUME_ADJUSTMENT_STEP = 0.2
+DEFAULT_MEDIA_VOLUME = 0.8
 COMMAND_HELP_MESSAGE = """
 I know the following commands: !help | !moveto <mumble channel> | !say <text to speak> | !replay [seconds] | !clip [seconds]
 """.strip()
@@ -147,6 +150,13 @@ def denotify_username(username):
 def audio_resample(buf, src_sr, dest_sr, method='sinc_best'):
     sr_ratio = float(dest_sr) / src_sr
     return samplerate.resample(buf, sr_ratio, converter_type=method).astype(numpy.int16)
+
+def halt_process(proc):
+    try:
+        # only available in 3.7+
+        proc.kill()
+    except:
+        proc.terminate()
 
 class QueuePipe:
     @staticmethod
@@ -389,6 +399,16 @@ class SpeakerControlCommand(Enum):
     SPEAK_MESSAGE = auto()
     SPEAK_MESSAGE_RESPONSE = auto()
 
+class MediaControlCommand(Enum):
+    EXIT = auto()
+    PLAY_ICECAST_STREAM = auto()
+    PLAY_YOUTUBE_VIDEO = auto()
+    AUDIO_CHUNK_READY = auto()
+    STOP = auto()
+    SET_VOLUME = auto()
+    SET_VOLUME_LOWER = auto()
+    SET_VOLUME_HIGHER = auto()
+
 class RouterControlCommand(Enum):
     EXIT = auto()
 
@@ -592,7 +612,7 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
                 else:
                     mmbl.users.myself.move_in(target_channel['channel_id'])
             elif cmd_data['cmd'] == MumbleControlCommand.SEND_CHANNEL_AUDIO_MSG:
-                log.info('Sending audio message: %d bytes', len(cmd_data['buffer']))
+                # log.debug('Sending audio message: %d bytes', len(cmd_data['buffer']))
                 mmbl.sound_output.add_sound(cmd_data['buffer'])
             elif cmd_data['cmd'] == MumbleControlCommand.DROP_CHANNEL_AUDIO_BUFFER:
                 log.info('Dropping outgoing audio buffer')
@@ -824,6 +844,7 @@ def proc_speaker(speaker_config, router_conn):
     log = getWorkerLogger('speaker', level=LOG_LEVEL)
     keep_running = True
     log.debug('Speaker starting up')
+    os.nice(5)
 
     try:
         engine = {
@@ -871,7 +892,124 @@ def proc_speaker(speaker_config, router_conn):
     log.debug('Speaker process exiting')
 
 @multiprocessify
-def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, master_conn):
+def proc_media(media_config, router_conn):
+    setproctitle.setproctitle('doty: media worker')
+    log = getWorkerLogger('media', level=LOG_LEVEL)
+    keep_running = True
+    log.debug('Media worker starting up')
+
+    FFMPEG_CMD = lambda input_arg: [
+        'ffmpeg',
+        '-loglevel',    'quiet',
+        '-y',
+        '-i',           input_arg,
+        '-ar',          str(PYMUMBLE_SAMPLERATE),
+        '-ac',          '1',
+        '-f',           's16le',
+        '-'
+    ]
+    YOUTUBE_DL_CMD = lambda video_url: [
+        'youtube-dl',
+        '-o',           '-',
+        video_url,
+    ]
+
+    ctx = {
+        'youtube-dl': None,
+        'ffmpeg': None,
+        'txid': None,
+    }
+    volume = DEFAULT_MEDIA_VOLUME
+    constrain_volume = lambda v: max(0.1, min(1.0, v))
+    def adjust_volume(chunk, volume_ratio):
+        d = numpy.frombuffer(chunk, dtype=numpy.int16) * volume_ratio
+        return d.astype(dtype=numpy.int16, casting='unsafe').tobytes()
+
+    def reset():
+        if ctx['txid'] is not None:
+            log.debug('Stopping txid=%s', ctx['txid'])
+        if ctx['youtube-dl'] is not None:
+            halt_process(ctx['youtube-dl'])
+            ctx['youtube-dl'] = None
+        if ctx['ffmpeg'] is not None:
+            halt_process(ctx['ffmpeg'])
+            ctx['ffmpeg'] = None
+        ctx['txid'] = None
+
+
+    log.info('Media worker running')
+    while keep_running:
+        if router_conn.poll(LONG_POLL):
+            cmd_data = router_conn.recv()
+            if cmd_data['cmd'] == MediaControlCommand.EXIT:
+                log.debug('Recieved EXIT command from router')
+                reset()
+                keep_running = False
+            elif cmd_data['cmd'] == MediaControlCommand.STOP:
+                log.debug('Recieved STOP command from router')
+                reset()
+            elif cmd_data['cmd'] == MediaControlCommand.SET_VOLUME:
+                volume = constrain_volume(cmd_data['value'])
+                log.debug('Volume set to: %0.2f', volume)
+            elif cmd_data['cmd'] == MediaControlCommand.SET_VOLUME_LOWER:
+                volume = constrain_volume(volume - VOLUME_ADJUSTMENT_STEP)
+                log.debug('Volume set to: %0.2f', volume)
+            elif cmd_data['cmd'] == MediaControlCommand.SET_VOLUME_HIGHER:
+                volume = constrain_volume(volume + VOLUME_ADJUSTMENT_STEP)
+                log.debug('Volume set to: %0.2f', volume)
+            elif cmd_data['cmd'] == MediaControlCommand.PLAY_ICECAST_STREAM:
+                reset()
+                ctx['txid'] = generate_uuid()
+                log.debug('PLAY_ICECAST_STREAM: txid=%s url=%s', ctx['txid'], cmd_data['url'])
+                ctx['ffmpeg'] = subprocess.Popen(FFMPEG_CMD(cmd_data['url']),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+            elif cmd_data['cmd'] == MediaControlCommand.PLAY_YOUTUBE_VIDEO:
+                reset()
+                ctx['txid'] = generate_uuid()
+                log.debug('PLAY_YOUTUBE_VIDEO: txid=%s url=%s', ctx['txid'], cmd_data['url'])
+                ctx['youtube-dl'] = subprocess.Popen(YOUTUBE_DL_CMD(cmd_data['url']),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                ctx['ffmpeg'] = subprocess.Popen(FFMPEG_CMD('-'),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                log.warning('Unrecognized command: %r', cmd_data)
+
+        pipe_data = None
+        if ctx['youtube-dl'] is not None:
+            pipe_data = ctx['youtube-dl'].stdout.read(PYMUMBLE_SAMPLERATE * SAMPLE_FRAME_SIZE * 8)
+            if ctx['youtube-dl'].poll() is not None:
+                log.debug('youtube-dl proc finished: txid=%s', ctx['txid'])
+                ctx['youtube-dl'] = None
+
+        chunk = None
+        if ctx['ffmpeg'] is not None:
+            if pipe_data:
+                ctx['ffmpeg'].stdin.write(pipe_data)
+            chunk = ctx['ffmpeg'].stdout.read(PYMUMBLE_SAMPLERATE * SAMPLE_FRAME_SIZE)
+            if ctx['ffmpeg'].poll() is not None:
+                log.debug('ffmpeg proc finished: txid=%s', ctx['txid'])
+                ctx['ffmpeg'] = None
+
+            if chunk:
+                router_conn.send({
+                    'cmd': MediaControlCommand.AUDIO_CHUNK_READY,
+                    'buffer': adjust_volume(chunk, volume),
+                    'txid': ctx['txid'],
+                })
+
+    log.debug('Media worker process exiting')
+
+@multiprocessify
+def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, media_conn, master_conn):
     setproctitle.setproctitle('doty: router worker')
     log = getWorkerLogger('router', level=LOG_LEVEL)
     keep_running = True
@@ -887,6 +1025,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
     irc_conn._swap()
     trans_conn._swap()
     speak_conn._swap()
+    media_conn._swap()
 
     def say(msg, source_id=0):
         log.debug('Speaking message: %s', msg)
@@ -896,6 +1035,15 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
             'actor': source_id,
             'txid': generate_uuid(),
             })
+    def text(msg):
+        irc_conn.send({
+            'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
+            'msg': msg,
+        })
+        mmbl_conn.send({
+            'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
+            'msg': msg,
+        })
 
     def silent_chunk(last_packet, offset):
         dt = offset * (PYMUMBLE_AUDIO_PER_PACKET / missing_packets)
@@ -950,8 +1098,9 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
 
         def __init__(self, config):
             self._setup_registry()
+            self._prepare_radio_stations(config['icecast_base_url'])
             self._engine = self._setup_parse_engine()
-            self._wa_client = self._setup_wolfram_alpha(config['api_key'])
+            self._wa_client = self._setup_wolfram_alpha(config['wolframalpha_api_key'])
 
         def _setup_registry(self):
             for member in self.__class__.__dict__.values():
@@ -960,6 +1109,21 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                     log.debug('Added handler for intent: %s', member.handled_intent)
                 except AttributeError:
                     continue
+
+        def _prepare_radio_stations(self, icecast_base_url):
+            station_index = requests.get(icecast_base_url + '/status-json.xsl').json()
+            self._station_map = {
+                s['title']: icecast_base_url + s['listenurl'].strip('.')
+                for s in station_index['icestats']['source']
+            }
+
+        def _fixup_dataset(self, dataset):
+            for e in dataset.entities:
+                if e.name == 'radio_station':
+                    e.utterances = [snips_nlu.dataset.entity.EntityUtterance(k.lower())
+                        for k in self._station_map]
+                    break
+            return dataset
 
         def _setup_wolfram_alpha(self, api_key):
             return wolframalpha.Client(api_key)
@@ -970,6 +1134,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
             with contexttimer.Timer() as t:
                 dataset = snips_nlu.dataset.Dataset.from_yaml_files('en',
                     [os.path.join(os.path.dirname(__file__), ds) for ds in self.DATASET_FILENAMES])
+                dataset = self._fixup_dataset(dataset)
                 engine.fit(dataset.json)
             log.debug('Model trained in %0.3fs', t.elapsed)
             return engine
@@ -1014,7 +1179,8 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
         @register_handler('help')
         def cmd_help(self, src, input):
             say('You can tell me to: make an audio clip or replay audio, change '
-                'to a different channel, or just ask a question')
+                'to a different channel, or just ask a question. You can also '
+                'tell me to play radio stations and change the volume')
 
         @register_handler('cmd_generate_clip')
         def cmd_generate_clip(self, src, input, duration=None):
@@ -1028,14 +1194,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
             if url:
                 resp = 'Clip of the last {} seconds: {}'.format(
                     seconds, url)
-                irc_conn.send({
-                    'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
-                    'msg': resp,
-                })
-                mmbl_conn.send({
-                    'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
-                    'msg': resp,
-                })
+                text(resp)
             else:
                 say('I wasn\'t able to upload the audio clip')
                 log.warning('Failed to upload audio clip')
@@ -1083,9 +1242,59 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
 
         @register_handler('cmd_silence')
         def cmd_silence(self, src, input):
+            media_conn.send({
+                'cmd': MediaControlCommand.STOP,
+            })
             mmbl_conn.send({
                 'cmd': MumbleControlCommand.DROP_CHANNEL_AUDIO_BUFFER,
             })
+
+        @register_handler('cmd_set_volume')
+        def cmd_set_volume(self, src, input, value=None):
+            if value is None:
+                say('Tell me what to set the volume to, between 10 and 100')
+                return
+            value = max(10, min(100, int(value))) / 100
+            media_conn.send({
+                'cmd': MediaControlCommand.SET_VOLUME,
+                'value': value,
+            })
+
+        @register_handler('cmd_lower_volume')
+        def cmd_lower_volume(self, src, input):
+            media_conn.send({
+                'cmd': MediaControlCommand.SET_VOLUME_LOWER,
+            })
+
+        @register_handler('cmd_raise_volume')
+        def cmd_raise_volume(self, src, input):
+            media_conn.send({
+                'cmd': MediaControlCommand.SET_VOLUME_HIGHER,
+            })
+
+        @register_handler('cmd_play_radio')
+        def cmd_play_radio(self, src, input, station=None):
+            if station is None:
+                say('Tell me what radio station to play')
+                return
+            key, _ = process.extractOne(station, self._station_map.keys())
+            media_conn.send({
+                'cmd': MediaControlCommand.PLAY_ICECAST_STREAM,
+                'url': self._station_map[key],
+            })
+            mmbl_conn.send({
+                'cmd': MumbleControlCommand.DROP_CHANNEL_AUDIO_BUFFER,
+            })
+
+        @register_handler('cmd_list_stations')
+        def cmd_list_stations(self, src, input):
+            text('Available radio stations: ' + ', '.join(self._station_map.keys()))
+
+        @register_handler('cmd_play_media')
+        def cmd_play_media(self, src, input, source=None, track=None, artist=None, album=None):
+            if source is None:
+                source = 'youtube'
+            say('I cannot play from youtube (yet)')
 
     if router_config['enable_commands']:
         cmd_engine = VoiceCommandParser(router_config['command_params'])
@@ -1095,7 +1304,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
 
     log.info('Router running')
     while keep_running:
-        ready = QueuePipe.wait(mmbl_conn, irc_conn, trans_conn, speak_conn, master_conn, timeout=SHORT_POLL)
+        ready = QueuePipe.wait(mmbl_conn, irc_conn, trans_conn, speak_conn, media_conn, master_conn, timeout=SHORT_POLL)
         if irc_conn in ready:
             cmd_data = irc_conn.recv()
             if cmd_data['cmd'] in (IrcControlCommand.RECV_CHANNEL_TEXT_MSG, IrcControlCommand.RECV_USER_TEXT_MSG):
@@ -1108,23 +1317,12 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                             'msg': '<{}> {}'.format(cmd_data['source'], msg),
                         })
                         if router_config['enable_commands']:
-                            # !help command
-                            if msg.startswith('!help'):
-                                irc_conn.send({
-                                    'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
-                                    'msg': COMMAND_HELP_MESSAGE,
-                                })
-                                mmbl_conn.send({
-                                    'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
-                                    'msg': COMMAND_HELP_MESSAGE,
-                                })
-                            # !moveto command
-                            if msg.startswith('!moveto'):
-                                target_name = msg.split(' ', 1)[1].strip()
-                                mmbl_conn.send({
-                                    'cmd': MumbleControlCommand.MOVE_TO_CHANNEL,
-                                    'channel_name': target_name,
-                                })
+                            if any(msg.startswith(w) for w in router_config['command_params']['activation_words']):
+                                try:
+                                    _, cmd = msg.split(' ', 1)
+                                except ValueError: pass
+                                else:
+                                    cmd_engine.dispatch({'name': cmd_data['source']}, cmd)
                             # !say command
                             if msg.startswith('!say'):
                                 say_msg = '{} said: {}'.format(
@@ -1132,39 +1330,6 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                                     msg.split(' ', 1)[1].strip(),
                                 )
                                 say(say_msg)
-                            # !replay command
-                            if msg.startswith('!replay'):
-                                try:
-                                    seconds = int(msg.strip().split(' ')[1])
-                                except (ValueError, IndexError):
-                                    seconds = router_config['mixed_buffer_len']
-                                buf = MIXED_BUFFER.get_last(seconds)
-                                MIXED_BUFFER.add_buffer(buf)
-                                mmbl_conn.send({
-                                    'cmd': MumbleControlCommand.SEND_CHANNEL_AUDIO_MSG,
-                                    'buffer': buf,
-                                })
-                            # !clip command
-                            if msg.startswith('!clip'):
-                                try:
-                                    seconds = min(int(msg.strip().split(' ')[1]), router_config['mixed_buffer_len'])
-                                except (ValueError, IndexError):
-                                    seconds = router_config['mixed_buffer_len']
-                                with io.BytesIO(buffer2wav(MIXED_BUFFER.get_last(seconds))) as f:
-                                    url = upload(f)
-                                if url:
-                                    resp = 'Clip of the last {} seconds: {}'.format(
-                                        seconds, url)
-                                    irc_conn.send({
-                                        'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
-                                        'msg': resp,
-                                    })
-                                    mmbl_conn.send({
-                                        'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
-                                        'msg': resp,
-                                    })
-                                else:
-                                    log.warning('Failed to upload audio clip')
             elif cmd_data['cmd'] == IrcControlCommand.USER_CREATE:
                 if cmd_data['source'] not in IRC_USERS:
                     IRC_USERS.append(cmd_data['source'])
@@ -1244,58 +1409,16 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                                 cmd_data['message'],
                         )})
                     if router_config['enable_commands']:
-                        # !help command
-                        if cmd_data['message'].startswith('!help'):
-                            irc_conn.send({
-                                'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
-                                'msg': COMMAND_HELP_MESSAGE,
-                            })
-                            mmbl_conn.send({
-                                'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
-                                'msg': COMMAND_HELP_MESSAGE,
-                            })
-                        # !moveto command
-                        if cmd_data['message'].startswith('!moveto'):
-                            target_name = cmd_data['message'].split(' ', 1)[1].strip()
-                            mmbl_conn.send({
-                                'cmd': MumbleControlCommand.MOVE_TO_CHANNEL,
-                                'channel_name': target_name
-                            })
+                        if any(cmd_data['message'].startswith(w) for w in router_config['command_params']['activation_words']):
+                            try:
+                                _, cmd = cmd_data['message'].split(' ', 1)
+                            except ValueError: pass
+                            else:
+                                cmd_engine.dispatch(sender, cmd)
                         # !say command
                         if cmd_data['message'].startswith('!say'):
                             say_msg = cmd_data['message'].split(' ', 1)[1].strip()
                             say(say_msg, source_id=cmd_data['actor'])
-                        # !replay command
-                        if cmd_data['message'].startswith('!replay'):
-                            try:
-                                seconds = int(cmd_data['message'].strip().split(' ')[1])
-                            except (ValueError, IndexError):
-                                seconds = router_config['mixed_buffer_len']
-                            buf = MIXED_BUFFER.get_last(seconds)
-                            MIXED_BUFFER.add_buffer(buf)
-                            mmbl_conn.send({
-                                'cmd': MumbleControlCommand.SEND_CHANNEL_AUDIO_MSG,
-                                'buffer': buf,
-                            })
-                        # !clip command
-                        if cmd_data['message'].startswith('!clip'):
-                            try:
-                                seconds = int(cmd_data['message'].strip().split(' ')[1])
-                            except (ValueError, IndexError):
-                                seconds = router_config['mixed_buffer_len']
-                            with io.BytesIO(buffer2wav(MIXED_BUFFER.get_last(seconds))) as f:
-                                url = upload(f)
-                            if url:
-                                irc_conn.send({
-                                    'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
-                                    'msg': url,
-                                })
-                                mmbl_conn.send({
-                                    'cmd': MumbleControlCommand.SEND_CHANNEL_TEXT_MSG,
-                                    'msg': url,
-                                })
-                            else:
-                                log.warning('Failed to upload audio clip')
             elif cmd_data['cmd'] in (MumbleControlCommand.RECV_CHANNEL_AUDIO, MumbleControlCommand.RECV_USER_AUDIO):
                 sender_data = AUDIO_BUFFERS[cmd_data['session']]
                 if cmd_data['name'] not in router_config['ignore']:
@@ -1365,6 +1488,9 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                 log.debug('Got speaker response: txid=%s actor=%d len=%d b',
                     cmd_data['txid'], cmd_data['actor'], len(cmd_data['buffer']))
                 cmd_data['cmd'] = MumbleControlCommand.SEND_CHANNEL_AUDIO_MSG
+                mmbl_conn.send({
+                    'cmd': MumbleControlCommand.DROP_CHANNEL_AUDIO_BUFFER,
+                })
                 mmbl_conn.send(cmd_data)
                 MIXED_BUFFER.add_buffer(cmd_data['buffer'])
                 irc_conn.send({
@@ -1373,6 +1499,14 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, mast
                 })
             else:
                 log.warning('Unrecognized command from speaker: %r', cmd_data)
+
+        if media_conn in ready:
+            cmd_data = media_conn.recv()
+            if cmd_data['cmd'] == MediaControlCommand.AUDIO_CHUNK_READY:
+                cmd_data['cmd'] = MumbleControlCommand.SEND_CHANNEL_AUDIO_MSG
+                mmbl_conn.send(cmd_data)
+            else:
+                log.warning('Unrecognized command from media: %r', cmd_data)
 
         if master_conn in ready:
             cmd_data = master_conn.recv()
@@ -1459,10 +1593,14 @@ def main(args, **kwargs):
         raise SystemExit()
     log.debug('Config validation passed')
 
+    # this is a placeholder as there is no actual media proc config atm
+    config['media'] = {}
+
     mmbl_conn = QueuePipe()
     irc_conn = QueuePipe()
     trans_conn = QueuePipe()
     speak_conn = QueuePipe()
+    media_conn = QueuePipe()
     router_conn = QueuePipe()
 
     running_procs = {}
@@ -1475,8 +1613,9 @@ def main(args, **kwargs):
         running_procs['transcriber'] = proc_transcriber(config['transcriber'], trans_conn)
     if not args.no_speaker:
         running_procs['speaker'] = proc_speaker(config['speaker'], speak_conn)
+    running_procs['media'] = proc_media(config['media'], media_conn)
     running_procs['router'] = proc_router(config['router'],
-        mmbl_conn, irc_conn, trans_conn, speak_conn, router_conn)
+        mmbl_conn, irc_conn, trans_conn, speak_conn, media_conn, router_conn)
     proc_start_times = {k: time.time() for k in running_procs.keys()}
     last_restart = time.time()
     restart_wait = config['main']['restart_wait']
@@ -1506,6 +1645,8 @@ def main(args, **kwargs):
                             running_procs[proc_name] = proc_transcriber(config[proc_name], trans_conn)
                         elif proc_name == 'speaker':
                             running_procs[proc_name] = proc_speaker(config[proc_name], speak_conn)
+                        elif proc_name == 'media':
+                            running_procs[proc_name] = proc_media(config[proc_name], speak_conn)
                         elif proc_name == 'router':
                             log.error('Not attempting to restart router, will now exit')
                             stop_running.set()
@@ -1527,12 +1668,7 @@ def main(args, **kwargs):
 
     for p in running_procs.values():
         p.join(LONG_POLL)
-        if p.exitcode is None:
-            try:
-                # only available in 3.7+
-                p.kill()
-            except AttributeError:
-                p.terminate()
+        halt_process(p)
 
     log.info('Shutdown complete')
 

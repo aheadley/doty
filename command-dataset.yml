@@ -98,14 +98,24 @@ slots:
     entity: radio_station
 utterances:
   - play [station](non stop pop) on the radio
-  - play [station] for me
-  - put on [station]
+  - play [station](west coast classics) for me
+  - put on [station](radio mirror park)
 
 ---
 type: entity
 name: radio_station
 automatically_extensible: false
-values: []
+# this will be filled in at runtime
+values:
+  - placeholder
+
+---
+type: intent
+name: cmd_list_stations
+utterances:
+  - what radio stations are there
+  - list the radio stations
+  - tell me what radio stations are available
 
 ---
 type: intent
@@ -114,20 +124,49 @@ slots:
   - name: source
     entity: media_source
   - name: track
-    entity: snips/MusicTrack
+    entity: snips/musicTrack
   - name: artist
-    entity: snips/MusicArtist
+    entity: snips/musicArtist
   - name: album
-    entity: snips/MusicAlbum
+    entity: snips/musicAlbum
 utterances:
-  - play [track] from [source]
-  - play [track] by [artist] on [source]
-  - find [track] on [source]
-  - check [source] for [track]
+  - play [track](take on me) from [source]
+  - play [track](toxicity) by [artist](system of a down) on [source]
+  - find [track](the distance) on [source]
+  - check [source] for [track](what is love)
+  - play [track](kids)
 
 ---
 type: entity
 name: media_source
 automatically_extensible: false
 values:
-  - youtube
+  - [youtube, you tube]
+
+---
+type: intent
+name: cmd_set_volume
+slots:
+  - name: value
+    entity: snips/number
+utterances:
+  - set the volume to [value](fifty)
+  - set volume at [value](twenty) percent
+
+---
+type: intent
+name: cmd_lower_volume
+utterances:
+  - lower the volume
+  - decrease the volume
+  - too loud
+  - bump volume down
+
+---
+type: intent
+name: cmd_raise_volume
+utterances:
+  - raise the volume
+  - increase the volume
+  - too quiet
+  - bump volume up
