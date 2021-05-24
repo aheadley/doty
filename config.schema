@@ -97,11 +97,12 @@ properties:
             type: string
           icecast_base_url:
             type: string
-          youtube_api_credentials_path:
+          youtube_api_key:
             type: string
         required:
           - activation_words
           - wolframalpha_api_key
+          - youtube_api_key
         additionalProperties: false
     required:
       - wait_time

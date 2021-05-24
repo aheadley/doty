@@ -124,14 +124,9 @@ slots:
   - name: source
     entity: media_source
   - name: track
-    entity: snips/musicTrack
-  - name: artist
-    entity: snips/musicArtist
-  - name: album
-    entity: snips/musicAlbum
+    entity: track_name
 utterances:
   - play [track](take on me) from [source]
-  - play [track](toxicity) by [artist](system of a down) on [source]
   - find [track](the distance) on [source]
   - check [source] for [track](what is love)
   - play [track](kids)
@@ -142,6 +137,11 @@ name: media_source
 automatically_extensible: false
 values:
   - [youtube, you tube]
+
+---
+type: entity
+name: track_name
+automatically_extensible: true
 
 ---
 type: intent

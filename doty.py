@@ -30,6 +30,7 @@ from enum import (
 )
 
 import contexttimer
+import googleapiclient.discovery
 import irc.client
 import irc.connection
 import jsonschema
@@ -901,7 +902,9 @@ def proc_media(media_config, router_conn):
     FFMPEG_CMD = lambda input_arg: [
         'ffmpeg',
         '-loglevel',    'quiet',
+        '-hide_banner',
         '-y',
+        '-re',
         '-i',           input_arg,
         '-ar',          str(PYMUMBLE_SAMPLERATE),
         '-ac',          '1',
@@ -910,7 +913,11 @@ def proc_media(media_config, router_conn):
     ]
     YOUTUBE_DL_CMD = lambda video_url: [
         'youtube-dl',
-        '-o',           '-',
+        '--quiet',
+        '--no-warnings',
+        '--no-progress',
+        '--prefer-free-formats',
+        '--output',     '-',
         video_url,
     ]
 
@@ -961,6 +968,8 @@ def proc_media(media_config, router_conn):
                 reset()
                 ctx['txid'] = generate_uuid()
                 log.debug('PLAY_ICECAST_STREAM: txid=%s url=%s', ctx['txid'], cmd_data['url'])
+                cmd = FFMPEG_CMD(cmd_data['url'])
+                log.debug('Running cmd: %r', cmd)
                 ctx['ffmpeg'] = subprocess.Popen(FFMPEG_CMD(cmd_data['url']),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
@@ -970,30 +979,30 @@ def proc_media(media_config, router_conn):
                 reset()
                 ctx['txid'] = generate_uuid()
                 log.debug('PLAY_YOUTUBE_VIDEO: txid=%s url=%s', ctx['txid'], cmd_data['url'])
-                ctx['youtube-dl'] = subprocess.Popen(YOUTUBE_DL_CMD(cmd_data['url']),
+                cmd = YOUTUBE_DL_CMD(cmd_data['url'])
+                log.debug('Running cmd: %r', cmd)
+                ctx['youtube-dl'] = subprocess.Popen(cmd,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                 )
-                ctx['ffmpeg'] = subprocess.Popen(FFMPEG_CMD('-'),
-                    stdin=subprocess.PIPE,
+                cmd = FFMPEG_CMD('-')
+                log.debug('Running cmd: %r', cmd)
+                ctx['ffmpeg'] = subprocess.Popen(cmd,
+                    stdin=ctx['youtube-dl'].stdout,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                 )
             else:
                 log.warning('Unrecognized command: %r', cmd_data)
 
-        pipe_data = None
         if ctx['youtube-dl'] is not None:
-            pipe_data = ctx['youtube-dl'].stdout.read(PYMUMBLE_SAMPLERATE * SAMPLE_FRAME_SIZE * 8)
             if ctx['youtube-dl'].poll() is not None:
                 log.debug('youtube-dl proc finished: txid=%s', ctx['txid'])
                 ctx['youtube-dl'] = None
 
         chunk = None
         if ctx['ffmpeg'] is not None:
-            if pipe_data:
-                ctx['ffmpeg'].stdin.write(pipe_data)
             chunk = ctx['ffmpeg'].stdout.read(PYMUMBLE_SAMPLERATE * SAMPLE_FRAME_SIZE)
             if ctx['ffmpeg'].poll() is not None:
                 log.debug('ffmpeg proc finished: txid=%s', ctx['txid'])
@@ -1088,6 +1097,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
             'Let me see',
             'Hhmm',
         ]
+        YOUTUBE_URL_FMT = 'https://www.youtube.com/watch?v={vid}'
         _handler_registry = {}
 
         def register_handler(intent):
@@ -1101,6 +1111,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
             self._prepare_radio_stations(config['icecast_base_url'])
             self._engine = self._setup_parse_engine()
             self._wa_client = self._setup_wolfram_alpha(config['wolframalpha_api_key'])
+            self._yt_client = self._setup_youtube(config['youtube_api_key'])
 
         def _setup_registry(self):
             for member in self.__class__.__dict__.values():
@@ -1138,6 +1149,11 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
                 engine.fit(dataset.json)
             log.debug('Model trained in %0.3fs', t.elapsed)
             return engine
+
+        def _setup_youtube(self, api_key):
+            client = googleapiclient.discovery.build(
+                'youtube', 'v3', developerKey=api_key)
+            return client
 
         def _duration_to_dt(self, duration):
             dt = datetime.timedelta(
@@ -1297,8 +1313,38 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
         @register_handler('cmd_play_media')
         def cmd_play_media(self, src, input, source=None, track=None, artist=None, album=None):
             if source is None:
+                # only youtube is supported for now
                 source = 'youtube'
-            say('I cannot play from youtube (yet)')
+            if track is None:
+                say('Tell me the name of a song to play')
+                return
+            query = track
+            if artist is not None:
+                query += ' - {}'.format(artist)
+            elif album is not None:
+                query += ' - {}'.format(album)
+
+            try:
+                for video in self._yt_client.search().list(
+                            part='snippet,id', q=query, type='video',
+                            videoDimension='2d',
+                            regionCode='US',
+                            safeSearch='moderate',
+                            # videoDuration='short',
+                        ).execute()['items']:
+                    selected_video = video
+                    break
+            except Exception as err:
+                log.exception(err)
+                say('I couldn\'t find anything to play for that')
+                return
+            url = self.YOUTUBE_URL_FMT.format(vid=selected_video['id']['videoId'])
+            log.debug('Selected video: id=%s title=%s', selected_video['id']['videoId'], selected_video['snippet']['title'])
+            media_conn.send({
+                'cmd': MediaControlCommand.PLAY_YOUTUBE_VIDEO,
+                'url': url,
+            })
+            text('Playing media: "{}" <{}>'.format(selected_video['snippet']['title'], url))
 
     if router_config['enable_commands']:
         cmd_engine = VoiceCommandParser(router_config['command_params'])
