@@ -1259,18 +1259,21 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
                 'cmd': MediaControlCommand.SET_VOLUME,
                 'value': value,
             })
+            text('Media volume set to {:02d}%'.format(int(value * 100)))
 
         @register_handler('cmd_lower_volume')
         def cmd_lower_volume(self, src, input):
             media_conn.send({
                 'cmd': MediaControlCommand.SET_VOLUME_LOWER,
             })
+            text('Media volume decreased by {:02d}%'.format(int(VOLUME_ADJUSTMENT_STEP * 100)))
 
         @register_handler('cmd_raise_volume')
         def cmd_raise_volume(self, src, input):
             media_conn.send({
                 'cmd': MediaControlCommand.SET_VOLUME_HIGHER,
             })
+            text('Media volume increased by {:02d}%'.format(int(VOLUME_ADJUSTMENT_STEP * 100)))
 
         @register_handler('cmd_play_radio')
         def cmd_play_radio(self, src, input, station=None):
@@ -1285,6 +1288,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
             mmbl_conn.send({
                 'cmd': MumbleControlCommand.DROP_CHANNEL_AUDIO_BUFFER,
             })
+            text('Playing radio station: {}'.format(key))
 
         @register_handler('cmd_list_stations')
         def cmd_list_stations(self, src, input):
