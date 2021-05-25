@@ -108,12 +108,9 @@ Doty supports commands through voice or text (in mumble or IRC), there are examp
 of the available voice commands in `command-dataset.yml`, though they will need to be
 prefixed by a configured activation word (ex: "robot, help").
 
-> robot help
-
+> "robot, what can you do?"
 >> You can tell me to: make an audio clip or replay audio, change to a different
 channel, or just ask a question. You can also tell me to play radio stations
 and change the volume
-
 > !help
-
 >> Available commands: !help, !say, !play-ytdl, !play

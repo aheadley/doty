@@ -53,7 +53,7 @@ router:
       - doty
       - dodie
     # The base URL (with no trailing slash) to an icecast server
-    icecast_base_url: 'https://overviewer.org/radio'
+    icecast_base_url: null
     # WolframAlpha Client ID
     # https://products.wolframalpha.com/api/
     wolframalpha_api_key: null
