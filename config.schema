@@ -94,14 +94,21 @@ properties:
             items:
               type: string
           wolframalpha_api_key:
-            type: string
+            type:
+              - string
+              - "null"
           icecast_base_url:
-            type: string
+            type:
+              - string
+              - "null"
           youtube_api_key:
-            type: string
+            type:
+              - string
+              - "null"
         required:
           - activation_words
           - wolframalpha_api_key
+          - icecast_base_url
           - youtube_api_key
         additionalProperties: false
     required:

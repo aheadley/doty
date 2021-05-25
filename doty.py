@@ -90,7 +90,12 @@ I know the following commands: !help | !moveto <mumble channel> | !say <text to 
 """.strip()
 
 signal.signal(signal.SIGINT, signal.SIG_IGN)
-logging.basicConfig(level=LOG_LEVEL)
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format='%(asctime)s.%(msecs)03d [%(process)07d] %(levelname)-7s %(name)s: %(message)s',
+    datefmt='%Y-%m-%dT%H:%M:%S',
+)
+logging.captureWarnings(True)
 
 def multiprocessify(func):
     @functools.wraps(func)
@@ -101,7 +106,7 @@ def multiprocessify(func):
     return wrapper
 
 def getWorkerLogger(worker_name, level=logging.DEBUG):
-    log = logging.getLogger('{}.{}-{:05d}'.format(APP_NAME, worker_name, os.getpid()))
+    log = logging.getLogger('{}.{}'.format(APP_NAME, worker_name))
     log.setLevel(level)
     return log
 
@@ -383,13 +388,6 @@ class IrcControlCommand(Enum):
     RECV_CHANNEL_ACTION = auto()
     SEND_CHANNEL_ACTION = auto()
 
-class DialogflowControlCommand(Enum):
-    EXIT = auto()
-    DETECT_INTENT_TEXT = auto()
-    DETECT_INTENT_TEXT_RESPONSE = auto()
-    DETECT_INTENT_AUDIO = auto()
-    DETECT_INTENT_AUDIO_RESPONSE = auto()
-
 class TranscriberControlCommand(Enum):
     EXIT = auto()
     TRANSCRIBE_MESSAGE = auto()
@@ -402,8 +400,8 @@ class SpeakerControlCommand(Enum):
 
 class MediaControlCommand(Enum):
     EXIT = auto()
-    PLAY_ICECAST_STREAM = auto()
-    PLAY_YOUTUBE_VIDEO = auto()
+    PLAY_AUDIO_URL = auto()
+    PLAY_VIDEO_URL = auto()
     AUDIO_CHUNK_READY = auto()
     STOP = auto()
     SET_VOLUME = auto()
@@ -616,12 +614,12 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
                 # log.debug('Sending audio message: %d bytes', len(cmd_data['buffer']))
                 mmbl.sound_output.add_sound(cmd_data['buffer'])
             elif cmd_data['cmd'] == MumbleControlCommand.DROP_CHANNEL_AUDIO_BUFFER:
-                log.info('Dropping outgoing audio buffer')
+                log.debug('Dropping outgoing audio buffer')
                 mmbl.sound_output.clear_buffer()
             else:
                 log.warning('Unrecognized command: %r', cmd_data)
         if not mmbl.is_alive():
-            log.error('Mumble connection has died')
+            log.warning('Mumble connection has died')
             keep_running = False
     log.debug('Mumble process exiting')
 
@@ -741,7 +739,7 @@ def proc_transcriber(transcription_config, router_conn):
         log.error('Failed to load transcription engine')
         log.exception(err)
 
-    log.info('Transcriber running')
+    log.info('Transcriber running: %s', transcription_config['engine'])
     while keep_running:
         if router_conn.poll(LONG_POLL):
             cmd_data = router_conn.recv()
@@ -861,7 +859,7 @@ def proc_speaker(speaker_config, router_conn):
     def speak(msg):
         return engine.speak(msg)
 
-    log.info('Speaker running')
+    log.info('Speaker running: %s', speaker_config['engine'])
     while keep_running:
         if router_conn.poll(LONG_POLL):
             cmd_data = router_conn.recv()
@@ -964,10 +962,10 @@ def proc_media(media_config, router_conn):
             elif cmd_data['cmd'] == MediaControlCommand.SET_VOLUME_HIGHER:
                 volume = constrain_volume(volume + VOLUME_ADJUSTMENT_STEP)
                 log.debug('Volume set to: %0.2f', volume)
-            elif cmd_data['cmd'] == MediaControlCommand.PLAY_ICECAST_STREAM:
+            elif cmd_data['cmd'] == MediaControlCommand.PLAY_AUDIO_URL:
                 reset()
                 ctx['txid'] = generate_uuid()
-                log.debug('PLAY_ICECAST_STREAM: txid=%s url=%s', ctx['txid'], cmd_data['url'])
+                log.info('PLAY_AUDIO_URL: txid=%s url=%s', ctx['txid'], cmd_data['url'])
                 cmd = FFMPEG_CMD(cmd_data['url'])
                 log.debug('Running cmd: %r', cmd)
                 ctx['ffmpeg'] = subprocess.Popen(FFMPEG_CMD(cmd_data['url']),
@@ -975,10 +973,10 @@ def proc_media(media_config, router_conn):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                 )
-            elif cmd_data['cmd'] == MediaControlCommand.PLAY_YOUTUBE_VIDEO:
+            elif cmd_data['cmd'] == MediaControlCommand.PLAY_VIDEO_URL:
                 reset()
                 ctx['txid'] = generate_uuid()
-                log.debug('PLAY_YOUTUBE_VIDEO: txid=%s url=%s', ctx['txid'], cmd_data['url'])
+                log.info('PLAY_VIDEO_URL: txid=%s url=%s', ctx['txid'], cmd_data['url'])
                 cmd = YOUTUBE_DL_CMD(cmd_data['url'])
                 log.debug('Running cmd: %r', cmd)
                 ctx['youtube-dl'] = subprocess.Popen(cmd,
@@ -1080,7 +1078,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
         resp = requests.post('https://0x0.st/', files={'file': handle})
         return resp.text.strip()
 
-    class VoiceCommandParser:
+    class CommandParser:
         DATASET_FILENAMES = [
             'command-dataset.yml',
         ]
@@ -1098,11 +1096,26 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
             'Hhmm',
         ]
         YOUTUBE_URL_FMT = 'https://www.youtube.com/watch?v={vid}'
-        _handler_registry = {}
+        BANG_CHARACTER = '!'
 
-        def register_handler(intent):
+        _intent_registry = {}
+        _bang_registry = {}
+
+        def handle_intent(intent):
             def wrapper(func):
-                func.handled_intent = intent
+                try:
+                    func.intents.append(intent)
+                except AttributeError:
+                    func.intents = [intent]
+                return func
+            return wrapper
+
+        def handle_bang(bang):
+            def wrapper(func):
+                try:
+                    func.bangs.append(bang)
+                except AttributeError:
+                    func.bangs = [bang]
                 return func
             return wrapper
 
@@ -1116,10 +1129,15 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
         def _setup_registry(self):
             for member in self.__class__.__dict__.values():
                 try:
-                    self.__class__._handler_registry[member.handled_intent] = member
-                    log.debug('Added handler for intent: %s', member.handled_intent)
-                except AttributeError:
-                    continue
+                    for intent in member.intents:
+                        self.__class__._intent_registry[intent] = member
+                        log.debug('Set handler for intent: %s -> %s', intent, member.__name__)
+                except AttributeError: pass
+                try:
+                    for bang in member.bangs:
+                        self.__class__._bang_registry[bang] = member
+                        log.debug('Set handler for bang: %s -> %s', bang, member.__name__)
+                except AttributeError: pass
 
         def _prepare_radio_stations(self, icecast_base_url):
             station_index = requests.get(icecast_base_url + '/status-json.xsl').json()
@@ -1141,7 +1159,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
 
         def _setup_parse_engine(self):
             engine = snips_nlu.SnipsNLUEngine(config=snips_nlu.default_configs.CONFIG_EN)
-            log.info('Training model on datasets: %s', ', '.join(self.DATASET_FILENAMES))
+            log.debug('Training model on datasets: %s', ', '.join(self.DATASET_FILENAMES))
             with contexttimer.Timer() as t:
                 dataset = snips_nlu.dataset.Dataset.from_yaml_files('en',
                     [os.path.join(os.path.dirname(__file__), ds) for ds in self.DATASET_FILENAMES])
@@ -1167,12 +1185,12 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
         def _buy_time_to_answer(self):
             say(random.choice(self.INTERSTITIAL_RESPONSES))
 
-        def dispatch(self, src, msg):
+        def dispatch_intent(self, src, msg):
             result = self._engine.parse(msg)
             log.debug('Intent parse result: %s', result)
             intent = result['intent']['intentName'] or '__UNKNOWN__'
             try:
-                handler = self.__class__._handler_registry[intent]
+                handler = self.__class__._intent_registry[intent]
             except KeyError:
                 log.warning('No registered handler for intent: %s', intent)
             else:
@@ -1184,21 +1202,69 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
                         continue
                 return handler(self, src, result['input'], **slots)
 
-        @register_handler('__UNKNOWN__')
+        def dispatch_bang(self, src, msg):
+            try:
+                bang, args = msg.split(' ', 1)
+            except ValueError:
+                bang = msg
+                args = None
+            try:
+                handler = self.__class__._bang_registry[bang[1:]]
+            except KeyError:
+                pass
+            else:
+                return handler(self, src, args)
+
+        @handle_bang('help')
+        def bang_help(self, src, input):
+            help_msg = ', '.join(self.BANG_CHARACTER + bang for bang in self._bang_registry.keys())
+            text('Available commands: ' + help_msg)
+
+        @handle_bang('say')
+        def bang_say(self, src, input):
+            if input is None:
+                text('{}: {}say <message>'.format(src['name'], self.BANG_CHARACTER))
+            else:
+                say('{} said: {}'.format(src['name'], input),
+                    source_id=src.get('actor', 0))
+
+        @handle_bang('play-ytdl')
+        def bang_play_yt(self, src, input):
+            if input is None:
+                text('{}: {}play-ytdl <url to play>'.format(src['name'], self.BANG_CHARACTER))
+            else:
+                text('Attempting to play: {}'.format(input))
+                media_conn.send({
+                    'cmd': MediaControlCommand.PLAY_VIDEO_URL,
+                    'url': input,
+                })
+
+        @handle_bang('play')
+        def bang_play_raw(self, src, input):
+            if input is None:
+                text('{}: {}play <url to play>'.format(src['name'], self.BANG_CHARACTER))
+            else:
+                text('Attempting to play: {}'.format(input))
+                media_conn.send({
+                    'cmd': MediaControlCommand.PLAY_AUDIO_URL,
+                    'url': input,
+                })
+
+        @handle_intent('__UNKNOWN__')
         def unknown_intent(self, src, input):
             say(random.choice(self.UNKNOWN_INTENT_RESPONSES))
 
-        @register_handler('greeting')
+        @handle_intent('greeting')
         def cmd_greeting(self, src, input):
             say('Hello {}'.format(src['name']))
 
-        @register_handler('help')
+        @handle_intent('help')
         def cmd_help(self, src, input):
             say('You can tell me to: make an audio clip or replay audio, change '
                 'to a different channel, or just ask a question. You can also '
                 'tell me to play radio stations and change the volume')
 
-        @register_handler('cmd_generate_clip')
+        @handle_intent('cmd_generate_clip')
         def cmd_generate_clip(self, src, input, duration=None):
             if duration is None:
                 seconds = router_config['mixed_buffer_len'] / 2
@@ -1215,7 +1281,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
                 say('I wasn\'t able to upload the audio clip')
                 log.warning('Failed to upload audio clip')
 
-        @register_handler('cmd_replay_audio')
+        @handle_intent('cmd_replay_audio')
         def cmd_replay_audio(self, src, input, duration=None):
             if duration is None:
                 say('You need to include how long you want me to replay')
@@ -1229,7 +1295,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
                 'buffer': buf,
             })
 
-        @register_handler('cmd_change_channel')
+        @handle_intent('cmd_change_channel')
         def cmd_change_channel(self, src, input, destination=None):
             if destination is None:
                 say('Include the channel I should move to')
@@ -1242,7 +1308,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
                 'channel_name': channel,
             })
 
-        @register_handler('cmd_wolfram_alpha_query')
+        @handle_intent('cmd_wolfram_alpha_query')
         def cmd_wolfram_alpha_query(self, src, input, query=None):
             if query is None:
                 say(random.choice(self.UNKNOWN_INTENT_RESPONSES))
@@ -1256,7 +1322,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
             else:
                 say(answer)
 
-        @register_handler('cmd_silence')
+        @handle_intent('cmd_silence')
         def cmd_silence(self, src, input):
             media_conn.send({
                 'cmd': MediaControlCommand.STOP,
@@ -1265,7 +1331,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
                 'cmd': MumbleControlCommand.DROP_CHANNEL_AUDIO_BUFFER,
             })
 
-        @register_handler('cmd_set_volume')
+        @handle_intent('cmd_set_volume')
         def cmd_set_volume(self, src, input, value=None):
             if value is None:
                 say('Tell me what to set the volume to, between 10 and 100')
@@ -1277,28 +1343,28 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
             })
             text('Media volume set to {:02d}%'.format(int(value * 100)))
 
-        @register_handler('cmd_lower_volume')
+        @handle_intent('cmd_lower_volume')
         def cmd_lower_volume(self, src, input):
             media_conn.send({
                 'cmd': MediaControlCommand.SET_VOLUME_LOWER,
             })
             text('Media volume decreased by {:02d}%'.format(int(VOLUME_ADJUSTMENT_STEP * 100)))
 
-        @register_handler('cmd_raise_volume')
+        @handle_intent('cmd_raise_volume')
         def cmd_raise_volume(self, src, input):
             media_conn.send({
                 'cmd': MediaControlCommand.SET_VOLUME_HIGHER,
             })
             text('Media volume increased by {:02d}%'.format(int(VOLUME_ADJUSTMENT_STEP * 100)))
 
-        @register_handler('cmd_play_radio')
+        @handle_intent('cmd_play_radio')
         def cmd_play_radio(self, src, input, station=None):
             if station is None:
                 say('Tell me what radio station to play')
                 return
             key, _ = process.extractOne(station, self._station_map.keys())
             media_conn.send({
-                'cmd': MediaControlCommand.PLAY_ICECAST_STREAM,
+                'cmd': MediaControlCommand.PLAY_AUDIO_URL,
                 'url': self._station_map[key],
             })
             mmbl_conn.send({
@@ -1306,11 +1372,11 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
             })
             text('Playing radio station: {}'.format(key))
 
-        @register_handler('cmd_list_stations')
+        @handle_intent('cmd_list_stations')
         def cmd_list_stations(self, src, input):
             text('Available radio stations: ' + ', '.join(self._station_map.keys()))
 
-        @register_handler('cmd_play_media')
+        @handle_intent('cmd_play_media')
         def cmd_play_media(self, src, input, source=None, track=None, artist=None, album=None):
             if source is None:
                 # only youtube is supported for now
@@ -1341,13 +1407,13 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
             url = self.YOUTUBE_URL_FMT.format(vid=selected_video['id']['videoId'])
             log.debug('Selected video: id=%s title=%s', selected_video['id']['videoId'], selected_video['snippet']['title'])
             media_conn.send({
-                'cmd': MediaControlCommand.PLAY_YOUTUBE_VIDEO,
+                'cmd': MediaControlCommand.PLAY_VIDEO_URL,
                 'url': url,
             })
             text('Playing media: "{}" <{}>'.format(selected_video['snippet']['title'], url))
 
     if router_config['enable_commands']:
-        cmd_engine = VoiceCommandParser(router_config['command_params'])
+        cmd_engine = CommandParser(router_config['command_params'])
 
     if router_config['startup_message']:
         say(router_config['startup_message'])
@@ -1372,14 +1438,9 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
                                     _, cmd = msg.split(' ', 1)
                                 except ValueError: pass
                                 else:
-                                    cmd_engine.dispatch({'name': cmd_data['source']}, cmd)
-                            # !say command
-                            if msg.startswith('!say'):
-                                say_msg = '{} said: {}'.format(
-                                    denotify_username(cmd_data['source']),
-                                    msg.split(' ', 1)[1].strip(),
-                                )
-                                say(say_msg)
+                                    cmd_engine.dispatch_intent({'name': cmd_data['source']}, cmd)
+                            elif msg.startswith(cmd_engine.BANG_CHARACTER):
+                                cmd_engine.dispatch_bang({'name': cmd_data['source']}, msg)
             elif cmd_data['cmd'] == IrcControlCommand.USER_CREATE:
                 if cmd_data['source'] not in IRC_USERS:
                     IRC_USERS.append(cmd_data['source'])
@@ -1464,11 +1525,9 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
                                 _, cmd = cmd_data['message'].split(' ', 1)
                             except ValueError: pass
                             else:
-                                cmd_engine.dispatch(sender, cmd)
-                        # !say command
-                        if cmd_data['message'].startswith('!say'):
-                            say_msg = cmd_data['message'].split(' ', 1)[1].strip()
-                            say(say_msg, source_id=cmd_data['actor'])
+                                cmd_engine.dispatch_intent(sender, cmd)
+                        elif cmd_data['message'].startswith(cmd_engine.BANG_CHARACTER):
+                            cmd_engine.dispatch_bang(sender, cmd_data['message'])
             elif cmd_data['cmd'] in (MumbleControlCommand.RECV_CHANNEL_AUDIO, MumbleControlCommand.RECV_USER_AUDIO):
                 sender_data = AUDIO_BUFFERS[cmd_data['session']]
                 if cmd_data['name'] not in router_config['ignore']:
@@ -1505,7 +1564,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
                 try:
                     sender = MMBL_USERS[cmd_data['actor']]
                 except KeyError:
-                    log.warning('Sender has disappeared: actor=%d', cmd_data['actor'])
+                    log.debug('Sender has disappeared: actor=%d', cmd_data['actor'])
                     sender = {'name': 'ghost:{:d}'.format(cmd_data['actor'])}
                 irc_conn.send({
                     'cmd': IrcControlCommand.SEND_CHANNEL_TEXT_MSG,
@@ -1525,7 +1584,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
                         log.debug('Found possible voice command: @%s %s', activation_word, voice_cmd)
                         if router_config['enable_commands']:
                             try:
-                                cmd_engine.dispatch(sender, voice_cmd)
+                                cmd_engine.dispatch_intent(sender, voice_cmd)
                             except Exception as err:
                                 log.error('Exception while processing voice command')
                                 log.exception(err)

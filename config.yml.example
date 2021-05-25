@@ -7,7 +7,7 @@
 main:
   # initial time to wait to restart a crashed process
   restart_wait: 3
-  # restart time is multiplied by this every time a restart is triggered
+  # restart time is multiplied by this every time any restart is triggered
   restart_factor: 1.5
   # max restart wait time
   restart_max: 300
@@ -16,6 +16,7 @@ mumble:
   server: localhost
   port: 64738
   username: doty-bot
+  # set to '' (empty string) if the server does not require a password
   password: 'CHANGE ME'
 
 irc:
@@ -24,36 +25,41 @@ irc:
   username: doty-bot
   channel: '#example'
   ssl: false
-  ssl_verify: false
+  # require a *valid* SSL certificate if ssl is true
+  ssl_verify: true
   # Allow connections via IPv6, does not require the connection to be via IPv6
   #   only disable this if the IPv6 stack is completely disabled on the host
   allow_ipv6: true
 
 router:
   # how long to wait after the last audio packet recieved from a user before
-  # sending the audio off for transcription
-  wait_time: 1.5
+  #   sending the audio off for transcription, has a big impact on how responsive
+  #   voice commands feel
+  wait_time: 0.7
   # the minimum length of an audio clip to bother transcribing
   min_buffer_len: 0.5
-  # length of time to store a buffer of the mixed audio stream for !replay and !clip
+  # length of time to store a buffer of the mixed audio stream for replay and clip
   mixed_buffer_len: 120
   # username/nicks to ignore in IRC and Mumble, applies to both text and audio
   ignore: []
-  # This will be spoken at bot startup, set to null or '' (empty string) to disable
+  # This will be spoken at bot startup, set to null to disable
   # https://www.youtube.com/watch?v=QrWAdq8e_uA
   startup_message: Reactor Online. Sensors Online. Weapons Online. All Systems Nominal.
-  # set this to false to make the bot ignore any !commands
+  # set this to false to make the bot ignore any text and voice commands
   enable_commands: true
   command_params:
     # the words or phrases to signal a voice command, think "ok google" or "alexa"
     activation_words:
       - doty
       - dodie
-    # WolframAlpha Client ID
-    wolframalpha_api_key: 'CHANGE-ME'
-
+    # The base URL (with no trailing slash) to an icecast server
     icecast_base_url: 'https://overviewer.org/radio'
-    youtube_api_key: 'CHANGE-ME'
+    # WolframAlpha Client ID
+    # https://products.wolframalpha.com/api/
+    wolframalpha_api_key: null
+    # YouTube API v3 key
+    # https://developers.google.com/youtube/registering_an_application
+    youtube_api_key: null
 
 transcriber:
   # one of:
@@ -73,6 +79,7 @@ transcriber:
     ### vosk
     # # https://alphacephei.com/vosk/models
     # model_path: 'path/to/model-dir'
+    # # should be one of: sinc_best, sinc_medium, sinc_fastest, zero_order_hold, linear
     # resample_method: sinc_best
 
     ### ibm-watson
@@ -80,7 +87,7 @@ transcriber:
     # service_url: 'https://stream.watsonplatform.net/speech-to-text/api'
     # # https://cloud.ibm.com/docs/services/speech-to-text/models.html
     # model: en-US_BroadbandModel
-  # an optional, extra vocabulary to help recognize words
+  # an optional, extra vocabulary to help recognize words for engines that support it
   hint_phrases: []
   # path to save audio data to
   save_to: null
@@ -94,11 +101,16 @@ speaker:
   engine: coqui-tts
   engine_params: {}
     ### coqui-tts
+    # # list models with `tts --list_models`
     # model: en/ljspeech/tacotron2-DDC
+    # # set to null to use the default vocoder for the model, or choose a
+    # #   specific vocoder model
     # vocoder: null
+    # # should be one of: sinc_best, sinc_medium, sinc_fastest, zero_order_hold, linear
     # resample_method: sinc_best
 
     ### gcloud-tts
+    # # https://cloud.google.com/iam/docs/creating-managing-service-account-keys
     # credentials_path: 'path/to/creds.json'
     # # https://cloud.google.com/text-to-speech/docs/voices
     # language: en-US
