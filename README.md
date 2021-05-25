@@ -112,5 +112,6 @@ prefixed by a configured activation word (ex: "robot, help").
 >> You can tell me to: make an audio clip or replay audio, change to a different
 channel, or just ask a question. You can also tell me to play radio stations
 and change the volume
+
 > !help
 >> Available commands: !help, !say, !play-ytdl, !play
