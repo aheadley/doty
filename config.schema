@@ -228,6 +228,7 @@ properties:
         type: string
         enum:
           - coqui-tts
+          - larynx-tts
           - gcloud-tts
       engine_params:
         type: object
@@ -258,6 +259,48 @@ properties:
               required:
                 - model
                 - vocoder
+                - resample_method
+              additionalProperties: false
+      - if:
+          properties:
+            engine:
+              const: larynx-tts
+        then:
+          properties:
+            engine_params:
+              type: object
+              properties:
+                model_path:
+                  type: string
+                noise_scale:
+                  type: number
+                  minimum: 0.0
+                  maximum: 1.0
+                length_scale:
+                  type: number
+                  minimum: 0.1
+                  maximum: 2.0
+                vocoder_path:
+                  type:
+                    - string
+                denoiser_strength:
+                  type: number
+                  minimum: 0.0
+                  maximum: 1.0
+                resample_method:
+                  type: string
+                  enum:
+                    - sinc_best
+                    - sinc_medium
+                    - sinc_fastest
+                    - zero_order_hold
+                    - linear
+              required:
+                - model_path
+                - noise_scale
+                - length_scale
+                - vocoder_path
+                - denoiser_strength
                 - resample_method
               additionalProperties: false
       - if:

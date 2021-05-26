@@ -100,8 +100,9 @@ transcriber:
 speaker:
   # one of:
   #   - coqui-tts
+  #   - larynx-tts
   #   - gcloud-tts
-  engine: coqui-tts
+  engine: larynx-tts
   engine_params: {}
     ### coqui-tts
     # # list models with `tts --list_models`

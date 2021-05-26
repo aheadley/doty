@@ -34,6 +34,7 @@ import googleapiclient.discovery
 import irc.client
 import irc.connection
 import jsonschema
+import larynx
 import numpy
 import requests
 import samplerate
@@ -814,6 +815,42 @@ class CoquiTTSEngine:
             self._synth.output_sample_rate, PYMUMBLE_SAMPLERATE, self._resample_method)
         return bytes(resampled_audio)
 
+class LarynxTTSEngine:
+    def __init__(self, engine_params, logger):
+        import gruut
+        self._log = logger
+
+        self._resample_method = engine_params['resample_method']
+        with open(os.path.join(engine_params['model_path'], 'config.json')) as model_config_file:
+            model_config = json.load(model_config_file)
+        self._model_samplerate = model_config['audio']['sample_rate']
+        self._tts_config = {
+            'gruut_lang': gruut.Language.load('en-us'),
+            'tts_model': larynx.load_tts_model(
+                model_type=larynx.constants.TextToSpeechType.GLOW_TTS,
+                model_path=engine_params['model_path'],
+            ),
+            'tts_settings': {
+                'noise_scale': engine_params['noise_scale'],
+                'length_scale': engine_params['length_scale'],
+            },
+            'vocoder_model': larynx.load_vocoder_model(
+                model_type=larynx.constants.VocoderType.HIFI_GAN,
+                model_path=engine_params['vocoder_path'],
+                denoiser_strength=engine_params['denoiser_strength'],
+            ),
+            'audio_settings': larynx.audio.AudioSettings(**model_config['audio']),
+        }
+
+    def speak(self, text):
+        results = larynx.text_to_speech(text=text, **self._tts_config)
+        combined_audio = bytes().join(
+            bytes(audio_resample(audio,
+                self._model_samplerate, PYMUMBLE_SAMPLERATE, self._resample_method))
+            for _, audio in results
+        )
+        return combined_audio
+
 class GoogleTTSEngine:
     def __init__(self, engine_params, logger):
         self._log = logger
@@ -848,6 +885,7 @@ def proc_speaker(speaker_config, router_conn):
     try:
         engine = {
             'coqui-tts': CoquiTTSEngine,
+            'larynx-tts': LarynxTTSEngine,
             'gcloud-tts': GoogleTTSEngine,
         }.get(speaker_config['engine'])(speaker_config['engine_params'], log)
     except Exception as err:
@@ -872,6 +910,8 @@ def proc_speaker(speaker_config, router_conn):
                 try:
                     with contexttimer.Timer(output=log.debug, prefix='engine.speak()'):
                         audio = speak(cmd_data['msg'].replace(ZW_SPACE, ''))
+                    log.debug('Generated audio duration: %0.2f seconds',
+                        (len(audio) / 2) / PYMUMBLE_SAMPLERATE)
                     c = speak.cache_info()
                     log.debug('speak() LRU hit rate: %0.2f', c.hits / (c.hits + c.misses))
                 except Exception as err:
