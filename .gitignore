@@ -126,3 +126,5 @@ dmypy.json
 # STT model/scorer
 *.pbmm
 *.scorer
+
+*.log
