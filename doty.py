@@ -84,10 +84,7 @@ AUDIO_CHANNELS = 1
 SAMPLE_FRAME_FORMAT = '<h'
 SAMPLE_FRAME_SIZE = struct.calcsize(SAMPLE_FRAME_FORMAT)
 VOLUME_ADJUSTMENT_STEP = 0.2
-DEFAULT_MEDIA_VOLUME = 0.8
-COMMAND_HELP_MESSAGE = """
-I know the following commands: !help | !moveto <mumble channel> | !say <text to speak> | !replay [seconds] | !clip [seconds]
-""".strip()
+DEFAULT_MEDIA_VOLUME = 0.5
 
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 logging.basicConfig(
@@ -1102,6 +1099,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
         ]
         YOUTUBE_URL_FMT = 'https://www.youtube.com/watch?v={vid}'
         BANG_CHARACTER = '!'
+        ICECAST_STATUS_URL = '/status-json.xsl'
 
         _intent_registry = {}
         _bang_registry = {}
@@ -1146,11 +1144,14 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
                 except AttributeError: pass
 
         def _prepare_radio_stations(self, icecast_base_url):
-            station_index = requests.get(icecast_base_url + '/status-json.xsl').json()
-            self._station_map = {
-                s['title']: icecast_base_url + s['listenurl'].strip('.')
-                for s in station_index['icestats']['source']
-            }
+            if icecast_base_url is None:
+                self._station_map = {}
+            else:
+                station_index = requests.get(icecast_base_url + self.ICECAST_STATUS_URL).json()
+                self._station_map = {
+                    s['title']: icecast_base_url + s['listenurl'].strip('.')
+                    for s in station_index['icestats']['source']
+                }
 
         def _fixup_dataset(self, dataset):
             for e in dataset.entities:
@@ -1161,6 +1162,8 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
             return dataset
 
         def _setup_wolfram_alpha(self, api_key):
+            if api_key is None:
+                return None
             return wolframalpha.Client(api_key)
 
         def _setup_parse_engine(self):
@@ -1175,6 +1178,8 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
             return engine
 
         def _setup_youtube(self, api_key):
+            if api_key is None:
+                return None
             client = googleapiclient.discovery.build(
                 'youtube', 'v3', developerKey=api_key)
             return client
@@ -1317,6 +1322,8 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
 
         @handle_intent('cmd_wolfram_alpha_query')
         def cmd_wolfram_alpha_query(self, src, input, query=None):
+            if self._wa_client is None:
+                return text('`router.command_params.wolframalpha_api_key` is not set')
             self._buy_time_to_answer()
             result = self._wa_client.query(input)
             try:
@@ -1363,6 +1370,8 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
 
         @handle_intent('cmd_play_radio')
         def cmd_play_radio(self, src, input, station=None):
+            if not self._station_map:
+                return text('`router.command_params.icecast_base_url` is not set')
             if station is None:
                 say('Tell me what radio station to play')
                 return
@@ -1382,6 +1391,8 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
 
         @handle_intent('cmd_play_media')
         def cmd_play_media(self, src, input, source=None, track=None, artist=None, album=None):
+            if self._yt_client is None:
+                return text('`router.command_params.youtube_api_key` is not set')
             if source is None:
                 # only youtube is supported for now
                 source = 'youtube'
