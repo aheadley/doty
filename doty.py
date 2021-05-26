@@ -1225,7 +1225,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
             if input is None:
                 text('{}: {}say <message>'.format(src['name'], self.BANG_CHARACTER))
             else:
-                say('{} said: {}'.format(src['name'], input),
+                say('{} said: {}'.format(denotify_username(src['name']), input),
                     source_id=src.get('actor', 0))
 
         @handle_bang('play-ytdl')
