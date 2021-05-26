@@ -89,6 +89,8 @@ properties:
       command_params:
         type: object
         properties:
+          use_interstitials:
+            type: boolean
           activation_words:
             type: array
             items:
@@ -106,6 +108,7 @@ properties:
               - string
               - "null"
         required:
+          - use_interstitials
           - activation_words
           - wolframalpha_api_key
           - icecast_base_url

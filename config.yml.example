@@ -48,6 +48,9 @@ router:
   # set this to false to make the bot ignore any text and voice commands
   enable_commands: true
   command_params:
+    # Insert interstitial phrases like "um" and "hmm" while longer audio responses
+    #   are generated, really only needed when using coqui-tts
+    use_interstitials: true
     # the words or phrases to signal a voice command, think "ok google" or "alexa"
     activation_words:
       - doty

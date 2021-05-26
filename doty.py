@@ -1092,11 +1092,13 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
             'What did you say?',
             'Would you repeat that?',
             'I don\'t know what you mean.',
+            'I didn\'t catch that.',
         ]
         INTERSTITIAL_RESPONSES = [
-            'Uhmm',
-            'Let me see',
-            'Hhmm',
+            'Uhmm.',
+            'Let me see.',
+            'Hhmm.',
+            'One sec.',
         ]
         YOUTUBE_URL_FMT = 'https://www.youtube.com/watch?v={vid}'
         BANG_CHARACTER = '!'
@@ -1123,6 +1125,7 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
             return wrapper
 
         def __init__(self, config):
+            self._use_interstitials = config['use_interstitials']
             self._setup_registry()
             self._prepare_radio_stations(config['icecast_base_url'])
             self._engine = self._setup_parse_engine()
@@ -1186,7 +1189,8 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
             return dt
 
         def _buy_time_to_answer(self):
-            say(random.choice(self.INTERSTITIAL_RESPONSES))
+            if self._use_interstitials:
+                say(random.choice(self.INTERSTITIAL_RESPONSES))
 
         def dispatch_intent(self, src, msg):
             result = self._engine.parse(msg)
@@ -1313,9 +1317,6 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
 
         @handle_intent('cmd_wolfram_alpha_query')
         def cmd_wolfram_alpha_query(self, src, input, query=None):
-            if query is None:
-                say(random.choice(self.UNKNOWN_INTENT_RESPONSES))
-                return
             self._buy_time_to_answer()
             result = self._wa_client.query(input)
             try:
