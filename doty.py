@@ -808,6 +808,9 @@ class CoquiTTSEngine:
         )
 
     def speak(self, text):
+        text = text.strip()
+        if text[-1] not in '.!?':
+            text += '.'
         audio = numpy.array(self._synth.tts(text, None, None))
         norm_audio = audio * (32767 / max(0.01, numpy.max(numpy.abs(audio))))
         resampled_audio = audio_resample(norm_audio,
