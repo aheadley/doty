@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import collections
+import ctypes
 import datetime
 import logging
 import subprocess
@@ -144,6 +145,7 @@ def denote_callback(clbk_type):
 
 generate_uuid = lambda: str(uuid.uuid4())
 sha1sum = lambda data: hashlib.sha1(data if type(data) in (bytes, bytearray) else data.encode('utf-8')).hexdigest()
+group_iter = lambda iterable, group_size: zip(*[iter(iterable)] * group_size)
 
 def denotify_username(username):
     if len(username) > 1:
@@ -349,6 +351,75 @@ class MixingBuffer:
 
     def _frames_to_seconds(self, frames):
         return frames / PYMUMBLE_SAMPLERATE
+
+class RNNoise:
+    # Based on https://github.com/Shb742/rnnoise_python/blob/master/rnnoise.py
+    SAMPLE_RATE = 48000
+    SAMPLE_SIZE = SAMPLE_FRAME_SIZE
+    SAMPLES_IN_FRAME = 480
+    FRAME_SIZE = SAMPLES_IN_FRAME * SAMPLE_SIZE
+
+    _lib = None
+
+    @classmethod
+    def _load_library(cls):
+        # a few sanity checks just in case
+        assert cls.SAMPLE_RATE == PYMUMBLE_SAMPLERATE
+        assert cls.SAMPLES_IN_FRAME * 100 == cls.SAMPLE_RATE
+
+        lib_path = ctypes.util.find_library('rnnoise')
+        logging.getLogger('.'.join([APP_NAME, 'transcriber', 'rnnoise'])).debug(
+            'Loading rnnoise lib: path=%s', lib_path)
+
+        lib = ctypes.cdll.LoadLibrary(lib_path)
+
+        lib.rnnoise_process_frame.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float)
+        ]
+        lib.rnnoise_process_frame.restype = ctypes.c_float
+        lib.rnnoise_create.restype = ctypes.c_void_p
+        lib.rnnoise_destroy.argtypes = [ctypes.c_void_p]
+
+        return lib
+
+    @classmethod
+    @property
+    def lib(cls):
+        if cls._lib is None:
+            cls._lib = cls._load_library()
+        return cls._lib
+
+    def __init__(self):
+        self._log = getWorkerLogger('transcriber.rnnoise')
+        self._state = self.lib.rnnoise_create(None)
+
+    def __del__(self):
+        if self._state is not None:
+            self.lib.rnnoise_destroy(self._state)
+            self._state = None
+
+    def process_frame(self, buffer):
+        in_buf = numpy.ndarray((self.SAMPLES_IN_FRAME,), numpy.int16, buffer).astype(ctypes.c_float)
+        in_ptr = in_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        out_buf = numpy.ndarray((self.SAMPLES_IN_FRAME,), ctypes.c_float)
+        out_ptr = out_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        vad_prob = self.lib.rnnoise_process_frame(self._state, out_ptr, in_ptr)
+        output = out_buf.astype(ctypes.c_short).tobytes()
+
+        assert len(output) == len(buffer)
+
+        return output, vad_prob
+
+    def denoise(self, buffer):
+        # append silence to pad out to the right length
+        buffer += bytes([0]) * (len(buffer) % (self.SAMPLES_IN_FRAME * self.SAMPLE_SIZE))
+
+        return b''.join(self.process_frame(bytes(chunk))[0] \
+            for chunk in group_iter(buffer, self.SAMPLES_IN_FRAME * self.SAMPLE_SIZE))
 
 class MumbleControlCommand(Enum):
     EXIT = auto()
@@ -621,14 +692,25 @@ def proc_mmbl(mmbl_config, router_conn, pymumble_debug=False):
             keep_running = False
     log.debug('Mumble process exiting')
 
-class CoquiSTTEngine:
+class BaseSTTEngine:
     def __init__(self, engine_params, logger):
         self._log = logger
+        self._denoiser = RNNoise()
+
+    def transcribe(self, buf, phrases=[]):
+        return self._transcribe(self._denoise(buf), phrases)
+
+    def _denoise(self, buffer):
+        return self._denoiser.denoise(buffer)
+
+class CoquiSTTEngine(BaseSTTEngine):
+    def __init__(self, engine_params, logger):
+        super().__init__(engine_params, logger)
         self._model = coqui_speechtotext.Model(engine_params['model_path'])
         self._model.enableExternalScorer(engine_params['scorer_path'])
         self._resample_method = engine_params['resample_method']
 
-    def transcribe(self, buf, phrases=[]):
+    def _transcribe(self, buf, phrases=[]):
         audio_data = numpy.frombuffer(buf, dtype=numpy.int16)
         model_samplerate = self._model.sampleRate()
         if model_samplerate != PYMUMBLE_SAMPLERATE:
@@ -649,16 +731,16 @@ class CoquiSTTEngine:
                     }
         return None
 
-class VoskSTTEngine:
+class VoskSTTEngine(BaseSTTEngine):
     def __init__(self, engine_params, logger):
         from vosk import Model, KaldiRecognizer, SetLogLevel
 
-        self._log = logger
+        super().__init__(engine_params, logger)
         SetLogLevel(0 if EXTRA_DEBUG else -1000)
         model = Model(engine_params['model_path'])
         self._recognizer = KaldiRecognizer(model, PYMUMBLE_SAMPLERATE)
 
-    def transcribe(self, buf, phrases=[]):
+    def _transcribe(self, buf, phrases=[]):
         self._recognizer.AcceptWaveform(buf)
         result = json.loads(self._recognizer.FinalResult())
 
@@ -673,9 +755,9 @@ class VoskSTTEngine:
             log.exception(err)
         return None
 
-class IBMWatsonEngine:
+class IBMWatsonEngine(BaseSTTEngine):
     def __init__(self, engine_params, logger):
-        self._log = logger
+        super().__init__(engine_params, logger)
         self._client = watson_speechtotext(
             iam_apikey=engine_params['api_key'],
             url=engine_params['service_url'],
@@ -683,7 +765,7 @@ class IBMWatsonEngine:
         self._hint_phrases = engine_params['hint_phrases']
         self._model = engine_params['model']
 
-    def transcribe(self, buf, phrases=[]):
+    def _transcribe(self, buf, phrases=[]):
         resp = self._client.recognize(
             audio=io.BytesIO(buf),
             content_type='audio/l16; rate={:d}; channels=1; endianness=little-endian'.format(PYMUMBLE_SAMPLERATE),
@@ -762,7 +844,7 @@ def proc_transcriber(transcription_config, router_conn):
                         map_fname = 'metadata.csv'
                         with wave.open(os.path.join(base_path, 'wavs', wav_fname), 'wb') as wav_file:
                             wav_file.setnchannels(AUDIO_CHANNELS)
-                            wav_file.setsampwidth(2)
+                            wav_file.setsampwidth(SAMPLE_FRAME_SIZE)
                             wav_file.setframerate(PYMUMBLE_SAMPLERATE)
                             wav_file.writeframes(cmd_data['buffer'])
                         with open(os.path.join(base_path, map_fname), 'a') as map_file:
@@ -774,9 +856,19 @@ def proc_transcriber(transcription_config, router_conn):
                 log.warning('Unrecognized command: %r', cmd_data)
     log.debug('Transcriber process exiting')
 
-class CoquiTTSEngine:
+class BaseTTSEngine:
     def __init__(self, engine_params, logger):
         self._log = logger
+
+    def _speak(self, text):
+        raise NotImplemented()
+
+    def speak(self, text):
+        return self._speak(text)
+
+class CoquiTTSEngine(BaseTTSEngine):
+    def __init__(self, engine_params, logger):
+        super().__init__(engine_params, logger)
         from TTS.utils.manage import ModelManager
         from TTS.utils.synthesizer import Synthesizer
 
@@ -799,9 +891,10 @@ class CoquiTTSEngine:
             False, # use_cuda
         )
 
-    def speak(self, text):
+    def _speak(self, text):
         text = text.strip()
         if text[-1] not in '.!?':
+            # coqui can have a stroke if it doesn't get a input end token
             text += '.'
         audio = numpy.array(self._synth.tts(text, None, None))
         norm_audio = audio * (32767 / max(0.01, numpy.max(numpy.abs(audio))))
@@ -809,10 +902,10 @@ class CoquiTTSEngine:
             self._synth.output_sample_rate, PYMUMBLE_SAMPLERATE, self._resample_method)
         return bytes(resampled_audio)
 
-class LarynxTTSEngine:
+class LarynxTTSEngine(BaseTTSEngine):
     def __init__(self, engine_params, logger):
         import gruut
-        self._log = logger
+        super().__init__(engine_params, logger)
 
         self._resample_method = engine_params['resample_method']
         with open(os.path.join(engine_params['model_path'], 'config.json')) as model_config_file:
@@ -836,7 +929,7 @@ class LarynxTTSEngine:
             'audio_settings': larynx.audio.AudioSettings(**model_config['audio']),
         }
 
-    def speak(self, text):
+    def _speak(self, text):
         results = larynx.text_to_speech(text=text, **self._tts_config)
         combined_audio = bytes().join(
             bytes(audio_resample(audio,
@@ -845,9 +938,9 @@ class LarynxTTSEngine:
         )
         return combined_audio
 
-class GoogleTTSEngine:
+class GoogleTTSEngine(BaseTTSEngine):
     def __init__(self, engine_params, logger):
-        self._log = logger
+        super().__init__(engine_params, logger)
         self._client = gcloud_texttospeech.TextToSpeechClient.from_service_account_json(engine_params['credentials_path'])
         self._voice = gcloud_texttospeech.VoiceSelectionParams(
             language_code=engine_params['language'],
@@ -862,7 +955,7 @@ class GoogleTTSEngine:
             volume_gain_db=engine_params['volume'],
         )
 
-    def speak(self, text):
+    def _speak(self, text):
         text_input = gcloud_texttospeech.SynthesisInput(text=text)
         response = self._client.synthesize_speech(input=text_input,
             voice=self._voice, audio_config=self._config)

@@ -62,6 +62,7 @@ Build/run requirements:
   - `gcc-c++`
   - `ffmpeg`
   - `youtube-dl`
+  - `rnnoise`
 
 To install (recommend using a virtualenv):
 

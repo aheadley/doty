@@ -20,6 +20,7 @@ RUN dnf update -y \
         youtube-dl \
         curl \
         unzip \
+        rnnoise \
     && dnf clean all
 
 COPY ./requirements*.txt /opt/doty/
