@@ -182,17 +182,8 @@ properties:
               properties:
                 model_path:
                   type: string
-                resample_method:
-                  type: string
-                  enum:
-                    - sinc_best
-                    - sinc_medium
-                    - sinc_fastest
-                    - zero_order_hold
-                    - linear
               required:
                 - model_path
-                - resample_method
               additionalProperties: false
       - if:
           properties:

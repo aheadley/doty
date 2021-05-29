@@ -650,22 +650,16 @@ class CoquiSTTEngine:
         return None
 
 class VoskSTTEngine:
-    KALDI_SAMPLERATE = 16000
     def __init__(self, engine_params, logger):
         from vosk import Model, KaldiRecognizer, SetLogLevel
 
         self._log = logger
-        self._resample_method = engine_params['resample_method']
         SetLogLevel(0 if EXTRA_DEBUG else -1000)
         model = Model(engine_params['model_path'])
-        self._recognizer = KaldiRecognizer(model, self.KALDI_SAMPLERATE)
+        self._recognizer = KaldiRecognizer(model, PYMUMBLE_SAMPLERATE)
 
     def transcribe(self, buf, phrases=[]):
-        audio = bytes(audio_resample(
-            numpy.frombuffer(buf, dtype=numpy.int16),
-            PYMUMBLE_SAMPLERATE, self.KALDI_SAMPLERATE, 
-            self._resample_method))
-        self._recognizer.AcceptWaveform(audio)
+        self._recognizer.AcceptWaveform(buf)
         result = json.loads(self._recognizer.FinalResult())
 
         try:
@@ -954,6 +948,7 @@ def proc_media(media_config, router_conn):
         '--quiet',
         '--no-warnings',
         '--no-progress',
+        '--no-playlist',
         '--prefer-free-formats',
         '--output',     '-',
         video_url,

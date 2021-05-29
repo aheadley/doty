@@ -43,6 +43,9 @@ some preparation:
   - `coqui-tts`: The configured model will be automatically downloaded when doty
     starts up. The quality of the speech is (usually) quite good but can have some
     occasional hiccups, and is very slow.
+  - `larynx-tts`: A [model and vocoder](https://github.com/rhasspy/larynx/releases/tag/2021-03-28)
+    will need to be downloaded, extracted and pointed to in the configuration.
+    Trades a little quality for speed compared to `coqui-tts`.
   - `google-tts`: A [Google Cloud](https://cloud.google.com/) account with a
     [JSON blob of credentials](https://cloud.google.com/iam/docs/creating-managing-service-account-keys)
     to use the Text-to-Speech service. The quality of the speech is good, and

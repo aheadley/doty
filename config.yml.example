@@ -82,8 +82,6 @@ transcriber:
     ### vosk
     # # https://alphacephei.com/vosk/models
     # model_path: 'path/to/model-dir'
-    # # should be one of: sinc_best, sinc_medium, sinc_fastest, zero_order_hold, linear
-    # resample_method: sinc_best
 
     ### ibm-watson
     # api_key: 'CHANGE ME'
@@ -110,6 +108,16 @@ speaker:
     # # set to null to use the default vocoder for the model, or choose a
     # #   specific vocoder model
     # vocoder: null
+    # # should be one of: sinc_best, sinc_medium, sinc_fastest, zero_order_hold, linear
+    # resample_method: sinc_best
+
+    ### larynx-tts
+    # # https://github.com/rhasspy/larynx/releases/tag/2021-03-28
+    # model_path: 'path/to/model'
+    # vocoder_path: 'path/to/vocoder'
+    # noise_scale: 0.333
+    # length_scale: 1.0
+    # denoiser_strength: 0.1
     # # should be one of: sinc_best, sinc_medium, sinc_fastest, zero_order_hold, linear
     # resample_method: sinc_best
 
