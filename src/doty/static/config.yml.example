@@ -18,6 +18,12 @@ mumble:
   username: doty-bot
   # set to '' (empty string) if the server does not require a password
   password: 'CHANGE ME'
+  # how long to wait after the last audio packet recieved from a user before
+  #   sending the audio off for transcription, has a big impact on how responsive
+  #   voice commands feel
+  buffer_wait_time: 0.7
+  # maximum time to buffer audio before dispatch
+  max_buffer_time: 60.0
 
 irc:
   server: localhost
@@ -32,10 +38,6 @@ irc:
   allow_ipv6: true
 
 router:
-  # how long to wait after the last audio packet recieved from a user before
-  #   sending the audio off for transcription, has a big impact on how responsive
-  #   voice commands feel
-  wait_time: 0.7
   # the minimum length of an audio clip to bother transcribing
   min_buffer_len: 0.5
   # length of time to store a buffer of the mixed audio stream for replay and clip

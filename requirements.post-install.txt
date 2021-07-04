@@ -1,0 +1,3 @@
+## these have bad dependency pinning so we will handle their dependencies ourselves
+# requires gruut, onnxruntime
+larynx==0.3.1

@@ -1,0 +1,47 @@
+[tool.poetry]
+name = "doty"
+version = "0.1.0"
+description = ""
+authors = ["aheadley <aheadley@waysaboutstuff.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+beautifulsoup4 = "^4.9.3"
+fuzzywuzzy = {extras = ["speedup"], version = "^0.18.0"}
+irc = "^19.0.1"
+jsonschema = "^3.2.0"
+pymumble = "^1.6.1"
+PyYAML = "^5.4.1"
+samplerate = "^0.1.0"
+setproctitle = "^1.2.2"
+vosk = "^0.3.30"
+wolframalpha = "^5.0.0"
+snips-nlu = "^0.20.2"
+gruut = "0.9.5"
+onnxruntime = "^1.8.0"
+google-cloud-texttospeech = {version = "^2.4.0", optional = true}
+watson-developer-cloud = {version = "^2.10.1", optional = true}
+contexttimer = "^0.3.3"
+numpy_ringbuffer = "^0.2.1"
+google-api-python-client = "^2.8.0"
+
+[tool.poetry.dev-dependencies]
+poethepoet = "^0.10.0"
+bpython = "^0.21"
+mypy = "^0.902"
+pytest = "^6.2.4"
+pylint = "^2.8.3"
+autopep8 = "^1.5.7"
+
+[tool.poetry.extras]
+cloud = ["google-cloud-texttospeech", "watson-developer-cloud"]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poe.tasks]
+_pre-install = "pip install -r requirements.pre-install.txt"
+_poetry-install = "poetry install"
+_post-install = "pip install --no-deps -r requirements.post-install.txt"
+install = ["_pre-install", "_poetry-install", "_post-install"]

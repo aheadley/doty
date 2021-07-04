@@ -30,11 +30,19 @@ properties:
         type: string
       password:
         type: string
+      buffer_wait_time:
+        type: number
+        minimum: 0.0
+      max_buffer_time:
+        type: number
+        minimum: 1.0
     required:
       - server
       - port
       - username
       - password
+      - buffer_wait_time
+      - max_buffer_time
     additionalProperties: false
 
   irc:
@@ -129,7 +137,7 @@ properties:
       engine:
         type: string
         enum:
-          - coqui-stt
+          # - coqui-stt
           - vosk
           - ibm-watson
       engine_params:
@@ -145,32 +153,32 @@ properties:
       save_only:
         type: boolean
     allOf:
-      - if:
-          properties:
-            engine:
-              const: coqui-stt
-        then:
-          properties:
-            engine_params:
-              type: object
-              properties:
-                model_path:
-                  type: string
-                scorer_path:
-                  type: string
-                resample_method:
-                  type: string
-                  enum:
-                    - sinc_best
-                    - sinc_medium
-                    - sinc_fastest
-                    - zero_order_hold
-                    - linear
-              required:
-                - model_path
-                - scorer_path
-                - resample_method
-              additionalProperties: false
+      # - if:
+      #     properties:
+      #       engine:
+      #         const: coqui-stt
+      #   then:
+      #     properties:
+      #       engine_params:
+      #         type: object
+      #         properties:
+      #           model_path:
+      #             type: string
+      #           scorer_path:
+      #             type: string
+      #           resample_method:
+      #             type: string
+      #             enum:
+      #               - sinc_best
+      #               - sinc_medium
+      #               - sinc_fastest
+      #               - zero_order_hold
+      #               - linear
+      #         required:
+      #           - model_path
+      #           - scorer_path
+      #           - resample_method
+      #         additionalProperties: false
       - if:
           properties:
             engine:
@@ -218,40 +226,40 @@ properties:
       engine:
         type: string
         enum:
-          - coqui-tts
+          # - coqui-tts
           - larynx-tts
           - gcloud-tts
       engine_params:
         type: object
     allOf:
-      - if:
-          properties:
-            engine:
-              const: coqui-tts
-        then:
-          properties:
-            engine_params:
-              type: object
-              properties:
-                model:
-                  type: string
-                vocoder:
-                  type:
-                    - string
-                    - "null"
-                resample_method:
-                  type: string
-                  enum:
-                    - sinc_best
-                    - sinc_medium
-                    - sinc_fastest
-                    - zero_order_hold
-                    - linear
-              required:
-                - model
-                - vocoder
-                - resample_method
-              additionalProperties: false
+      # - if:
+      #     properties:
+      #       engine:
+      #         const: coqui-tts
+      #   then:
+      #     properties:
+      #       engine_params:
+      #         type: object
+      #         properties:
+      #           model:
+      #             type: string
+      #           vocoder:
+      #             type:
+      #               - string
+      #               - "null"
+      #           resample_method:
+      #             type: string
+      #             enum:
+      #               - sinc_best
+      #               - sinc_medium
+      #               - sinc_fastest
+      #               - zero_order_hold
+      #               - linear
+      #         required:
+      #           - model
+      #           - vocoder
+      #           - resample_method
+      #         additionalProperties: false
       - if:
           properties:
             engine:

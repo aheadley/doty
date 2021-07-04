@@ -1,7 +1,5 @@
-# these are required for some of the things in requirements.txt to build
-#   successfully, but are not either not explicitly listed or pip doesn't handle
-#   them right
+## these are unlisted build dependencies
+# required by scikit-learn
 Cython==0.29.23
-numpy==1.19.5
-scipy==1.6.3
+# required by snips-nlu
 setuptools-rust==0.12.1
