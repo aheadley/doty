@@ -7,7 +7,7 @@ google-cloud-texttospeech==2.3.0
 gruut==0.9.5
 irc==19.0.1
 jsonschema==3.2.0
-numpy==1.19.5
+numpy==1.22.0
 numpy-ringbuffer==0.2.1
 onnxruntime==1.7.0
 pymumble==1.6.1
