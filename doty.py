@@ -1651,7 +1651,10 @@ def proc_router(router_config, mmbl_conn, irc_conn, trans_conn, speak_conn, medi
             elif cmd_data['cmd'] == MumbleControlCommand.CHANNEL_REMOVE:
                 del MMBL_CHANNELS[cmd_data['channel']['channel_id']]
             elif cmd_data['cmd'] in (MumbleControlCommand.RECV_CHANNEL_TEXT_MSG, MumbleControlCommand.RECV_USER_TEXT_MSG):
-                sender = MMBL_USERS[cmd_data['actor']]
+                try:
+                    sender = MMBL_USERS[cmd_data['actor']]
+                except KeyError:
+                    sender = {'name': 'ghost:{}'.format(cmd_data['actor'])}
                 if sender['name'] in router_config['ignore']:
                     log.info('Ignoring text message from user: %s', sender['name'])
                 else:
@@ -1885,7 +1888,7 @@ def main(args, **kwargs):
                     log.warning('Detected process exit: %s exitcode=%s runtime=%1.2fs',
                         proc_name, proc.exitcode, (time.time() - proc_start_times[proc_name]))
                     proc_start_times[proc_name] = None
-                if not args.no_autorestart:                
+                if not args.no_autorestart:
                     if (time.time() - last_restart) > restart_wait:
                         log.info('Restarting proc: %s', proc_name)
                         if proc_name == 'mumble':
