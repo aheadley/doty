@@ -1,5 +1,4 @@
 ---
-
 type: object
 properties:
   main:
@@ -132,6 +131,7 @@ properties:
           - coqui-stt
           - vosk
           - ibm-watson
+          - whisper-local
       engine_params:
         type: object
       hint_phrases:
@@ -204,6 +204,23 @@ properties:
                 - api_key
                 - service_url
                 - model
+              additionalProperties: false
+      - if:
+          properties:
+            engine:
+              const: whisper-local
+        then:
+          properties:
+            engine_params:
+              type: object
+              properties:
+                model:
+                  type: string
+                temperature:
+                  type: number
+              required:
+                - model
+                - temperature
               additionalProperties: false
     required:
       - engine

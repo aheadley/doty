@@ -1,5 +1,4 @@
 ---
-
 # In addition to being an example config file, this is file is loaded to set
 # default values for any keys missing from the user config, so the user only
 # needs to specify values that they are overriding
@@ -17,13 +16,13 @@ mumble:
   port: 64738
   username: doty-bot
   # set to '' (empty string) if the server does not require a password
-  password: 'CHANGE ME'
+  password: "CHANGE ME"
 
 irc:
   server: localhost
   port: 6667
   username: doty-bot
-  channel: '#example'
+  channel: "#example"
   ssl: false
   # require a *valid* SSL certificate if ssl is true
   ssl_verify: true
@@ -69,8 +68,11 @@ transcriber:
   #   - coqui-stt: local speech-to-text, worse results than most online services
   #   - vosk: local speech-to-text, pretty good results
   #   - ibm-watson: IBM's Watson STT service
+  #   - whisper-local: Locally-ran version of OpenAI's whisper model
+  #   - whisper-remote: OpenAI's whisper model via API
   engine: vosk
-  engine_params: {}
+  engine_params:
+    {}
     ### coqui-stt
     # # https://stt.readthedocs.io/en/latest/DEPLOYMENT.html#download-models
     # model_path: 'path/to/model.pbmm'
@@ -88,6 +90,10 @@ transcriber:
     # service_url: 'https://stream.watsonplatform.net/speech-to-text/api'
     # # https://cloud.ibm.com/docs/services/speech-to-text/models.html
     # model: en-US_BroadbandModel
+
+    ### whisper-local
+    # model: name of model to be used
+    # temperature: 0.0-1.0 make more "creative" predictions closer to 1.0
   # an optional, extra vocabulary to help recognize words for engines that support it
   hint_phrases: []
   # path to save audio data to
@@ -100,8 +106,10 @@ speaker:
   #   - coqui-tts
   #   - larynx-tts
   #   - gcloud-tts
+  #   - elevenlabs
   engine: larynx-tts
-  engine_params: {}
+  engine_params:
+    {}
     ### coqui-tts
     # # list models with `tts --list_models`
     # model: en/ljspeech/tacotron2-DDC
@@ -136,3 +144,7 @@ speaker:
     # # https://cloud.google.com/text-to-speech/docs/audio-profiles
     # effect_profiles:
     #   - handset-class-device
+
+    ### elevenlabs
+    # api_key: xxx
+    # voice_id: xxx

@@ -26,3 +26,4 @@ https://github.com/aheadley/TTS/archive/refs/heads/main.tar.gz
 vosk==0.3.27
 watson-developer-cloud==2.10.1
 wolframalpha==5.0.0
+openai-whisper==20230314

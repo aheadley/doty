@@ -6,21 +6,21 @@ RUN useradd --home-dir / --no-create-home --shell /sbin/nologin doty
 
 RUN dnf update -y \
     && dnf install -y \
-        "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
-        "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm" \
+    "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
+    "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm" \
     && dnf install -y \
-        @development-tools \
-        libsamplerate \
-        python-devel \
-        python-virtualenv \
-        rust \
-        cargo \
-        gcc-c++ \
-        ffmpeg \
-        youtube-dl \
-        curl \
-        unzip \
-        rnnoise \
+    @development-tools \
+    libsamplerate \
+    python-devel \
+    python-virtualenv \
+    rust \
+    cargo \
+    gcc-c++ \
+    ffmpeg \
+    youtube-dl \
+    curl \
+    unzip \
+    rnnoise \
     && dnf clean all
 
 COPY ./requirements*.txt /opt/doty/
@@ -37,6 +37,6 @@ RUN virtualenv /opt/doty-venv \
 COPY . /opt/doty
 
 VOLUME ["/opt/doty-data"]
-USER doty:nobody
+# USER doty:nobody
 
 ENTRYPOINT ["/opt/doty-venv/bin/python", "/opt/doty/doty.py"]

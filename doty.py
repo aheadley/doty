@@ -68,6 +68,8 @@ from pymumble_py3.errors import (
 import stt as coqui_speechtotext
 import TTS as coqui_texttospeech
 from watson_developer_cloud import SpeechToTextV1 as watson_speechtotext
+import whisper
+# import elevenlabslib
 
 APP_NAME = 'doty'
 LOG_LEVEL = logging.INFO
@@ -795,6 +797,33 @@ class IBMWatsonEngine(BaseSTTEngine):
             }
         return None
 
+class WhisperLocalEngine(BaseSTTEngine):
+    def __init__(self, engine_params, logger):
+        super().__init__(engine_params, logger)
+        self._model = whisper.load_model(engine_params['model'], device='cpu')
+        self._temp = tuple(numpy.arange(engine_params['temperature'], 1.0 + 1e-6, 0.2))
+
+    def _transcribe(self, buf, phrases=[]):
+        buf = numpy.frombuffer(buf, numpy.int16)
+        buf = audio_resample(buf, PYMUMBLE_SAMPLERATE, whisper.audio.SAMPLE_RATE)
+        buf = buf.flatten().astype(numpy.float32) / 32768.0
+
+        result = whisper.transcribe(model=self._model, audio=buf,
+            verbose=None,
+            temperature=self._temp,
+            initial_prompt='These are hint words: ' + ' '.join(phrases) + '.',
+            fp16=False,
+        )
+
+        self._log.debug('result=%r', result)
+
+        if result['text'].strip():
+            return {
+                'transcript': result['text'].strip(),
+                'confidence': sum(s['avg_logprob'] for s in result['segments']) / len(result['segments']),
+            }
+        return None
+
 @multiprocessify
 def proc_transcriber(transcription_config, router_conn):
     setproctitle.setproctitle('doty: transcriber worker')
@@ -807,6 +836,7 @@ def proc_transcriber(transcription_config, router_conn):
             'coqui-stt': CoquiSTTEngine,
             'vosk': VoskSTTEngine,
             'ibm-watson': IBMWatsonEngine,
+            'whisper-local': WhisperLocalEngine,
         }.get(transcription_config['engine'])(transcription_config['engine_params'], log)
     except Exception as err:
         keep_running = False
@@ -825,7 +855,7 @@ def proc_transcriber(transcription_config, router_conn):
                     result = {'transcript': 'NO_DATA', 'confidence': 0.0}
                 else:
                     with contexttimer.Timer(output=log.debug, prefix='engine.transcribe()'):
-                        result = engine.transcribe(cmd_data['buffer'], cmd_data['phrases'])
+                        result = engine.transcribe(cmd_data['buffer'], cmd_data['phrases'] + transcription_config['hint_phrases'])
                 if result:
                     if not transcription_config['save_only']:
                         log.debug('Transcription result: txid=%s actor=%d result=%r',
@@ -960,6 +990,16 @@ class GoogleTTSEngine(BaseTTSEngine):
         response = self._client.synthesize_speech(input=text_input,
             voice=self._voice, audio_config=self._config)
         return response.audio_content[WAV_HEADER_LEN:]
+
+class ElevenLabsEngine(BaseTTSEngine):
+    def __init__(self, engine_params, logger):
+        super().__init__(engine_params, logger)
+        user = elevenlabslib.ElevenLabsUser(engine_params['api_key'])
+        self._voice = user.get_voice_by_ID(engine_params['voice_id'])
+
+    def _speak(self, text):
+        # TODO: convert this from mp3 to wav
+        return self._voice.generate_audio_bytes(text)
 
 @multiprocessify
 def proc_speaker(speaker_config, router_conn):
