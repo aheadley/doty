@@ -31,8 +31,8 @@ RUN virtualenv /opt/doty-venv \
     && /opt/doty-venv/bin/pip install -Ur /opt/doty/requirements.txt \
     && /opt/doty-venv/bin/pip install --no-deps -r /opt/doty/requirements.larynx.txt \
     && /opt/doty-venv/bin/snips-nlu download en \
-    && rm -rf ~/.cache/ ~/.cargo/ /tmp/* \
-    && /opt/doty-venv/bin/pip uninstall -y torch
+    && rm -rf ~/.cache/ ~/.cargo/ /tmp/*
+# && /opt/doty-venv/bin/pip uninstall -y torch
 
 COPY . /opt/doty
 
